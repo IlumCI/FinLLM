@@ -58,14 +58,20 @@ class LAMb(nn.Module):
         value_mask: torch.Tensor,
         pad_mask: Optional[torch.Tensor] = None,
         n_steps: Optional[int] = None,
+        hidden_adapter=None,
     ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
         x = self.embed(input_ids, abacus_ids, value, value_mask)
         h, aux = self.core(x, pad_mask, n_steps)
-        logits = self.lm_head(self.norm_f(h))
+        h = self.norm_f(h)
+        # Optional per-environment adapter (shared-backbone POET): a tiny module
+        # that specialises the shared backbone's hidden state before the LM head.
+        if hidden_adapter is not None:
+            h = hidden_adapter(h)
+        logits = self.lm_head(h)
         return logits, aux
 
     def compute_loss(
-        self, batch: Dict[str, torch.Tensor], n_steps: Optional[int] = None
+        self, batch: Dict[str, torch.Tensor], n_steps: Optional[int] = None, hidden_adapter=None
     ) -> Tuple[torch.Tensor, Dict[str, float]]:
         logits, aux = self.forward(
             batch["input_ids"],
@@ -74,6 +80,7 @@ class LAMb(nn.Module):
             batch["value_mask"],
             batch.get("pad_mask"),
             n_steps,
+            hidden_adapter=hidden_adapter,
         )
         b, t, vsz = logits.shape
         ce = F.cross_entropy(
@@ -103,6 +110,7 @@ class LAMb(nn.Module):
         device: str = "cpu",
         greedy: bool = True,
         temperature: float = 1.0,
+        hidden_adapter=None,
     ) -> List[List[int]]:
         """Autoregressively decode answer token ids for each problem (batched).
 
@@ -131,7 +139,7 @@ class LAMb(nn.Module):
         answer_start = width
         done = torch.zeros(b, dtype=torch.bool, device=device)
         for _ in range(max_answer_len):
-            logits, _ = self.forward(ids, abacus, value, vmask, pad, n_steps)
+            logits, _ = self.forward(ids, abacus, value, vmask, pad, n_steps, hidden_adapter=hidden_adapter)
             step_logits = logits[:, -1, :]
             if greedy:
                 nxt = step_logits.argmax(dim=-1)
@@ -176,10 +184,12 @@ class LAMb(nn.Module):
         max_answer_len: int = 20,
         n_steps: Optional[int] = None,
         device: str = "cpu",
+        hidden_adapter=None,
     ) -> List[Optional[str]]:
         """Greedy-decode and return the answer string for each problem."""
         gen = self._generate_ids(
-            problems, tokenizer, max_answer_len, n_steps, device, greedy=True
+            problems, tokenizer, max_answer_len, n_steps, device, greedy=True,
+            hidden_adapter=hidden_adapter,
         )
         return [tokenizer.decode_answer(ids) for ids in gen]
 

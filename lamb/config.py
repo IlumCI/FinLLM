@@ -154,6 +154,7 @@ class POETConfig:
     # Agents (per-environment specialists). Kept small for a CPU population.
     agent_d_model: int = 96
     agent_recurrent_steps: int = 3
+    adapter_rank: int = 16       # shared-backbone POET: per-environment adapter width
 
     # Inner optimisation (expert iteration on the environment's exact answers).
     opt_steps: int = 4

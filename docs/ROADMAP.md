@@ -78,9 +78,15 @@ the solver must keep dominating its own past on an ever-advancing frontier.
   ([1901.01753](https://arxiv.org/abs/1901.01753)); Enhanced POET
   ([2003.08536](https://arxiv.org/pdf/2003.08536)); Transfer Dynamics
   ([2203.10941](https://arxiv.org/pdf/2203.10941)).
-  Remaining: GPU scale-up of the agents; behavioural-novelty (not just descriptor
-  dedup) admission; and a shared-backbone population (adapters per environment) to
-  cut the N-agents cost.
+- **Shared-backbone POET (implemented, `python -m lamb.poet_shared`).** One shared
+  backbone plus a tiny low-rank adapter per environment (`lamb/poet_shared.py`): a
+  population of N environments costs one backbone + N adapters (~21% of the
+  parameters of N full models at capacity 5), and the backbone accumulates
+  cross-environment skill for implicit transfer. Measured: it grows, transfers, and
+  conquers the base frontier, at lower absolute mastery than independent agents --
+  the honest efficiency/capacity tradeoff of a final-layer adapter.
+  Remaining: LoRA/deeper adapters (adapt the core, not just the final hidden); GPU
+  scale-up of the agents; behavioural-novelty (not just descriptor-dedup) admission.
 
 Refs: Digital Red Queen ([2601.03335](https://arxiv.org/abs/2601.03335));
 PopuLoRA ([2605.16727](https://arxiv.org/pdf/2605.16727)); learnable information

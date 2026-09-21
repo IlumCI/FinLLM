@@ -216,6 +216,17 @@ frontier advances while transfers fire, and it conquers base environments (e.g.
 optimization budget and agent size -- i.e. it scales. Following POET / Enhanced
 POET (arXiv:1901.01753, 2003.08536).
 
+**Shared-backbone variant** (`lamb/poet_shared.py`, `python -m lamb.poet_shared`):
+one shared backbone plus a tiny low-rank adapter per environment (via the
+`hidden_adapter` seam in `LAMb.forward`, which modulates the hidden state before
+the LM head). A population of N environments then costs one backbone + N adapters
+(~21% of N full models at capacity 5), and the shared backbone -- updated by every
+environment -- accumulates cross-environment skill, so a reproduced environment
+inherits a competent backbone (implicit transfer); explicit transfer just copies
+the small adapter. The tradeoff is honest: parameter-efficient, but a final-layer
+adapter specialises less than a full model, so absolute mastery is lower on the
+tiny setup (LoRA/deeper adapters are the roadmap's next step).
+
 ## Defaults
 
 Tiny CPU-first model: `d_model=128`, 1 prelude / 1 recurrent / 1 coda block,

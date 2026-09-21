@@ -48,6 +48,7 @@ python -m lamb.train --solver grpo           # add a GRPO/RLVR term on the solve
 python -m lamb.train --red-queen             # Red Queen coevolution (league + novelty + relative fitness)
 python -m lamb.train --red-queen --open-ended --proposer factored_hyper   # open-ended grammar (Step 2)
 python -m lamb.poet                          # POET population of (env, agent) pairs (Step 3)
+python -m lamb.poet_shared                    # shared-backbone POET (one backbone + tiny adapters)
 python -m lamb.memory_bench                   # long-context needle/passkey retrieval (infContext)
 python -m lamb.ruler_bench                     # RULER/BABILong-style suite (NIAH, multi-key, variable tracking)
 ```
@@ -86,6 +87,7 @@ lamb/                     Python package (torch)
   eval.py                 held-out accuracy, length generalization, test-time scaling
   train.py                CPU-first end-to-end entry point (single-agent self-play)
   poet.py                 POET population of (environment, agent) pairs (Step 3)
+  poet_shared.py          shared-backbone POET: one backbone + per-environment adapters
   memory_bench.py         long-context needle/passkey retrieval benchmark (infContext)
   ruler_bench.py          RULER/BABILong-style suite: NIAH, multi-key, variable tracking
 rust/                     lamb_core native kernels (PyO3/maturin)

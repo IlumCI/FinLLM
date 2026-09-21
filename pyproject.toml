@@ -29,6 +29,7 @@ dev = ["pytest>=7.0", "maturin>=1.7"]
 [project.scripts]
 lamb-train = "lamb.train:main"
 lamb-poet = "lamb.poet:main"
+lamb-poet-shared = "lamb.poet_shared:main"
 lamb-memory-bench = "lamb.memory_bench:main"
 lamb-ruler-bench = "lamb.ruler_bench:main"
 
