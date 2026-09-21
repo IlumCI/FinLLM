@@ -18,7 +18,7 @@ import torch
 from . import __version__
 from ._native import backend
 from .config import ModelConfig, TrainConfig
-from .eval import evaluate, test_time_scaling
+from .eval import evaluate, length_generalization, test_time_scaling
 from .model.lamb import build_model
 from .selfplay.loop import SelfPlayTrainer
 from .tokenizer import ArithmeticTokenizer
@@ -34,6 +34,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--d-model", type=int, default=ModelConfig.d_model)
     p.add_argument("--recurrent-steps", type=int, default=ModelConfig.recurrent_steps)
     p.add_argument("--use-memory", action="store_true", help="enable test-time neural memory")
+    p.add_argument("--proposer", type=str, default=TrainConfig.proposer_kind,
+                   choices=["bandit", "grpo_hyper"], help="task proposer")
+    p.add_argument("--solver", type=str, default=TrainConfig.solver_algo,
+                   choices=["expert", "grpo"], help="solver optimisation (expert iteration or +GRPO)")
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--device", type=str, default="cpu")
     p.add_argument("--eval-every", type=int, default=TrainConfig.eval_every)
@@ -59,6 +63,8 @@ def main(argv=None) -> None:
         eval_every=args.eval_every,
         log_every=args.log_every,
         ckpt_dir=args.ckpt_dir,
+        proposer_kind=args.proposer,
+        solver_algo=args.solver,
     )
     model_cfg = ModelConfig(
         d_model=args.d_model,
@@ -74,6 +80,7 @@ def main(argv=None) -> None:
     print(f"model params: {model.num_params():,} | difficulty cells: {len(trainer.grid)}")
     print(f"ops={ops} max_digits={args.max_digits} recurrent_steps={args.recurrent_steps} "
           f"use_memory={args.use_memory} device={args.device}")
+    print(f"proposer={args.proposer} solver={args.solver}")
     print("-" * 88)
 
     eval_budget = 2 * args.max_digits + 2
@@ -82,12 +89,18 @@ def main(argv=None) -> None:
     for _ in range(args.steps):
         stats = trainer.train_step()
         if stats.step % args.log_every == 0:
-            print(
+            line = (
                 f"step {stats.step:5d} | loss {stats.loss:6.3f} | tok_acc {stats.token_acc:5.2f} "
                 f"| solve {stats.batch_success:4.2f} | frontier {stats.mastered_frontier:2d} "
                 f"| buf {stats.buffer_size:6d} | H(prop) {stats.proposer_entropy:4.2f} "
                 f"| top {stats.top_cell}"
             )
+            if "grpo_reward" in stats.extra:
+                line += (f" | grpo r {stats.extra['grpo_reward']:.2f} "
+                         f"kept {stats.extra.get('grpo_kept', 0):.2f}")
+            if "prop_kl" in stats.extra:
+                line += f" | propKL {stats.extra['prop_kl']:.2f}"
+            print(line)
         if stats.step % args.eval_every == 0:
             res = evaluate(model, tok, trainer.grid, n_per_cell=12, device=args.device,
                            max_answer_len=eval_budget)
@@ -110,6 +123,13 @@ def main(argv=None) -> None:
     )
     print("test-time latent-step scaling (T -> acc):",
           " ".join(f"{t}:{a:.2f}" for t, a in scaling.items()))
+
+    lengths = length_generalization(
+        model, tok, ops, max_test_digits=args.max_digits + 1,
+        train_max_digits=args.max_digits, n_per_cell=32, device=args.device,
+    )
+    print("length generalization (digits -> acc; >{} is extrapolation):".format(args.max_digits),
+          " ".join(f"{d}:{a:.2f}" for d, a in lengths.items()))
 
     if not args.no_save:
         os.makedirs(args.ckpt_dir, exist_ok=True)

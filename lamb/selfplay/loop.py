@@ -3,14 +3,16 @@
 Each step:
 
 1. **Propose.** Sample a batch of difficulty cells from the proposer (uniformly
-   during a short warmup, then from its learned policy).
+   during a short warmup, then from its policy: the bandit, or the GRPO-trained
+   hypernetwork).
 2. **Generate & supervise.** Draw a concrete ``(problem, answer)`` per cell from
    the exact verifier and take one teacher-forcing SGD step on the solver, mixed
-   with a fraction of replayed *solved* traces (expert iteration / STaR).
+   with a fraction of replayed *solved* traces (expert iteration / STaR). When
+   ``solver_algo == "grpo"``, a GRPO/RLVR term is added after a warm-up.
 3. **Roll out.** Greedy-decode the solver on the fresh problems and check each
    with the exact verifier -- this is the only reward signal.
 4. **Co-evolve.** Update per-cell success (EMA), push solved traces into the
-   replay buffer, and update the proposer by REINFORCE toward learnability.
+   replay buffer, and update the proposer toward learnability.
 
 The observable signature of self-improvement: held-out accuracy climbs while the
 *mastered difficulty frontier* expands over training.
@@ -18,10 +20,11 @@ The observable signature of self-improvement: held-out accuracy climbs while the
 
 from __future__ import annotations
 
+import copy
 import math
 import random
 from collections import defaultdict, deque
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
@@ -31,7 +34,9 @@ from ..config import TrainConfig
 from ..data import collate
 from ..model.lamb import LAMb
 from ..tokenizer import ArithmeticTokenizer
-from .proposer import Proposer
+from . import grpo as grpo_utils
+from .hyperproposer import GRPOHyperProposer
+from .proposer import BanditProposer, BaseProposer, learnability
 from .verifier import Verifier
 
 
@@ -45,6 +50,7 @@ class StepStats:
     buffer_size: int
     proposer_entropy: float
     top_cell: str
+    extra: Dict[str, float] = field(default_factory=dict)
 
 
 def _answer_budget(cfg: TrainConfig) -> int:
@@ -58,25 +64,26 @@ class SelfPlayTrainer:
         cfg: TrainConfig,
         model: LAMb,
         tokenizer: ArithmeticTokenizer,
-        proposer: Optional[Proposer] = None,
+        proposer: Optional[BaseProposer] = None,
     ):
         self.cfg = cfg
         self.model = model
         self.tok = tokenizer
         self.verifier = Verifier()
         self.grid: List[Tuple[str, int, int]] = cfg.difficulty_grid()
-        # The proposer is injectable: the default is the learning-progress bandit,
-        # but any object exposing ``sample(n, learnability)`` / ``probs`` /
-        # ``entropy`` can be dropped in -- e.g. a GRPO-trained hypernetwork policy
-        # that keeps the bandit as its KL/coverage anchor (see docs/ROADMAP.md).
-        self.proposer = proposer or Proposer(
-            len(self.grid),
-            temperature=cfg.proposer_temp,
-            eps=cfg.proposer_eps,
-            rng=random.Random(cfg.seed + 1),
-        )
+        # The proposer is injectable and swappable via cfg.proposer_kind. Both
+        # implementations share the BaseProposer interface: the learning-progress
+        # bandit (default), or the GRPO-trained hypernetwork anchored to it.
+        self.proposer = proposer or self._build_proposer()
 
         self.opt = torch.optim.AdamW(model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
+
+        # GRPO/RLVR keeps a frozen reference policy for the KL term.
+        self.ref_model: Optional[LAMb] = None
+        if cfg.solver_algo == "grpo":
+            self.ref_model = copy.deepcopy(model).eval()
+            for p in self.ref_model.parameters():
+                p.requires_grad_(False)
 
         self.buffer: deque = deque(maxlen=cfg.buffer_capacity)
         self.success_ema: Dict[int, float] = {i: 0.0 for i in range(len(self.grid))}
@@ -84,6 +91,20 @@ class SelfPlayTrainer:
         self._seed_ctr = 1
         self._answer_len = _answer_budget(cfg)
         self.step = 0
+
+    def _build_proposer(self) -> BaseProposer:
+        cfg = self.cfg
+        n = len(self.grid)
+        if cfg.proposer_kind == "grpo_hyper":
+            return GRPOHyperProposer(
+                n, hidden=cfg.hyper_hidden, eps=cfg.proposer_eps, bandit_temp=cfg.proposer_temp,
+                kl_coef=cfg.hyper_kl_coef, entropy_coef=cfg.hyper_entropy_coef, lr=cfg.hyper_lr,
+                rng=random.Random(cfg.seed + 1),
+            )
+        return BanditProposer(
+            n, temperature=cfg.proposer_temp, eps=cfg.proposer_eps,
+            rng=random.Random(cfg.seed + 1),
+        )
 
     # -- helpers ----------------------------------------------------------
     def _next_seed(self) -> int:
@@ -101,17 +122,14 @@ class SelfPlayTrainer:
         progress = min(1.0, max(0.0, progress))
         return min_lr + 0.5 * (self.cfg.lr - min_lr) * (1.0 + math.cos(math.pi * progress))
 
-    def _learnability(self) -> np.ndarray:
-        return np.array(
-            [4.0 * self.success_ema[i] * (1.0 - self.success_ema[i]) for i in range(len(self.grid))],
-            dtype=np.float64,
-        )
+    def _state(self) -> np.ndarray:
+        """The per-cell solver-competence state (smoothed success), the proposer input."""
+        return np.array([self.success_ema[i] for i in range(len(self.grid))], dtype=np.float64)
 
-    def _sample_cells(self, n: int) -> List[int]:
+    def _sample_cells(self, n: int, state: np.ndarray) -> List[int]:
         if self.step < self.cfg.proposer_warmup:
             return [self._rng.randrange(len(self.grid)) for _ in range(n)]
-        cells, _ = self.proposer.sample(n, self._learnability())
-        return cells
+        return self.proposer.sample(n, state)
 
     def _mastered_frontier(self) -> int:
         frontier = 0
@@ -120,10 +138,25 @@ class SelfPlayTrainer:
                 frontier = max(frontier, a + b)
         return frontier
 
+    def _grpo_term(self, problems: List[str]) -> Tuple[Optional[torch.Tensor], Dict[str, float]]:
+        cfg = self.cfg
+        subset = problems[: cfg.grpo_problems]
+        gloss, gmetrics, solved = grpo_utils.grpo_solver_loss(
+            self.model, self.ref_model, self.tok, self.verifier, subset,
+            group_size=cfg.grpo_group_size, temperature=cfg.grpo_temperature,
+            kl_coef=cfg.grpo_kl_coef, normalize_std=cfg.grpo_normalize_std,
+            dynamic_sampling=cfg.grpo_dynamic_sampling, max_answer_len=self._answer_len,
+            device=cfg.device,
+        )
+        for p, pr in solved:
+            self.buffer.append((p, pr))
+        return gloss, gmetrics
+
     # -- one optimisation step -------------------------------------------
     def train_step(self) -> StepStats:
         cfg = self.cfg
-        cells = self._sample_cells(cfg.batch_size)
+        state = self._state()  # competence state actions are sampled from
+        cells = self._sample_cells(cfg.batch_size, state)
         problems: List[str] = []
         answers: List[str] = []
         for idx in cells:
@@ -149,10 +182,22 @@ class SelfPlayTrainer:
         if cfg.sample_train_depth:
             n_steps = self._rng.randint(cfg.train_min_steps, cfg.train_max_steps)
         loss, metrics = self.model.compute_loss(batch, n_steps=n_steps)
+
+        extra: Dict[str, float] = {}
+        # GRPO/RLVR term on the solver (added to expert CE after a warm start).
+        if cfg.solver_algo == "grpo" and self.step >= cfg.grpo_warmup:
+            gloss, gmetrics = self._grpo_term(problems)
+            extra.update(gmetrics)
+            if gloss is not None:
+                loss = loss + cfg.grpo_coef * gloss
+
         self.opt.zero_grad(set_to_none=True)
         loss.backward()
         torch.nn.utils.clip_grad_norm_(self.model.parameters(), cfg.grad_clip)
         self.opt.step()
+
+        if self.ref_model is not None and (self.step + 1) % cfg.grpo_ref_update_every == 0:
+            self.ref_model.load_state_dict(self.model.state_dict())
 
         # Roll out on the freshly proposed problems for the reward signal.
         preds = self.model.solve(
@@ -166,9 +211,16 @@ class SelfPlayTrainer:
         batch_success = sum(correct) / max(1, len(correct))
         self._update_success_ema(cells, correct)
 
+        # Co-evolve the proposer: reward each proposed cell by its (updated)
+        # learnability; the bandit ignores this, the hypernetwork learns from it.
+        if self.step >= cfg.proposer_warmup:
+            rewards = learnability(self._state())
+            prop_metrics = self.proposer.update(state, cells, [rewards[c] for c in cells])
+            extra.update(prop_metrics)
+
         self.step += 1
-        learn = self._learnability()
-        top_idx = int(self.proposer.probs(learn).argmax())
+        post = self._state()
+        top_idx = int(self.proposer.probs(post).argmax())
         stats = StepStats(
             step=self.step,
             loss=float(loss.detach()),
@@ -176,8 +228,9 @@ class SelfPlayTrainer:
             batch_success=batch_success,
             mastered_frontier=self._mastered_frontier(),
             buffer_size=len(self.buffer),
-            proposer_entropy=self.proposer.entropy(learn),
+            proposer_entropy=self.proposer.entropy(post),
             top_cell="{}{}x{}".format(*self.grid[top_idx]),
+            extra=extra,
         )
         return stats
 

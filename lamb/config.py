@@ -73,9 +73,32 @@ class TrainConfig:
     max_digits: int = 2          # ceiling on operand width the proposer may reach
     start_digits: int = 1        # difficulty frontier begins here
     mastery_threshold: float = 0.9  # a cell counts as mastered above this solve rate
+    proposer_kind: str = "bandit"   # "bandit" | "grpo_hyper"
     proposer_temp: float = 6.0   # softmax sharpness over per-cell learnability
     proposer_warmup: int = 60    # uniform-coverage steps before the proposer engages
     proposer_eps: float = 0.35   # exploration floor: fraction of cells drawn uniformly
+
+    # GRPO hypernetwork proposer (proposer_kind == "grpo_hyper").
+    hyper_hidden: int = 64
+    hyper_lr: float = 5e-3
+    hyper_kl_coef: float = 0.3    # KL anchor to the (non-collapsing) bandit
+    hyper_entropy_coef: float = 0.05
+    # Note: on this small grid the GRPO policy concentrates sharply on the single
+    # highest-learnability cell (the correct frontier target); the proposer_eps
+    # floor preserves coverage and it tracks the frontier as it moves. Its payoff
+    # over the tabular bandit is generalization on large/continuous task spaces.
+
+    # Solver optimisation: expert iteration (default) or add a GRPO/RLVR term.
+    solver_algo: str = "expert"  # "expert" | "grpo"
+    grpo_warmup: int = 120       # expert-only steps before GRPO engages (warm start)
+    grpo_problems: int = 16      # distinct problems per GRPO step (subset of the batch)
+    grpo_group_size: int = 4     # sampled answers per problem
+    grpo_temperature: float = 1.0
+    grpo_kl_coef: float = 0.02
+    grpo_coef: float = 1.0       # weight of the GRPO term added to the expert CE loss
+    grpo_normalize_std: bool = True   # False = Dr.GRPO-style (no difficulty bias)
+    grpo_dynamic_sampling: bool = True  # DAPO: drop zero-variance groups
+    grpo_ref_update_every: int = 100  # steps between reference-policy refreshes
 
     # Expert iteration replay buffer (STaR-style): verified solver traces.
     buffer_capacity: int = 20000

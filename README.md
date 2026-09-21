@@ -40,9 +40,11 @@ If step 2 is skipped, LAMb transparently uses the Python fallbacks
 ## Run the self-play demo
 
 ```bash
-python -m lamb.train                     # ~4 min on 4 CPU cores
+python -m lamb.train                     # ~4 min on 4 CPU cores (bandit + expert iteration)
 python -m lamb.train --steps 4000 --recurrent-steps 6   # pushes the frontier further
 python -m lamb.train --use-memory        # enable the test-time memory in the core
+python -m lamb.train --proposer grpo_hyper   # GRPO-trained hypernetwork proposer
+python -m lamb.train --solver grpo           # add a GRPO/RLVR term on the solver
 ```
 
 You will watch, from zero data:
@@ -67,10 +69,12 @@ lamb/                     Python package (torch)
     memory.py             Titans/ATLAS-style test-time neural memory
     lamb.py               the LAMb model: forward / loss / batched solve
   selfplay/
-    proposer.py           learning-progress bandit (pluggable interface)
+    proposer.py           learning-progress bandit (default; pluggable interface)
+    hyperproposer.py      GRPO-trained hypernetwork proposer, bandit-anchored
+    grpo.py               GRPO utilities + solver RLVR objective (DAPO/Dr.GRPO options)
     verifier.py           exact reward oracle (wraps the Rust kernels)
     loop.py               Absolute-Zero-style self-play trainer
-  eval.py                 held-out accuracy + test-time scaling probes
+  eval.py                 held-out accuracy, length generalization, test-time scaling
   train.py                CPU-first end-to-end entry point
 rust/                     lamb_core native kernels (PyO3/maturin)
   src/arith.rs            exact recursive-descent integer evaluator + verifier
@@ -90,12 +94,35 @@ The suite includes an **in-context associative-recall** test that binds a fresh
 random key→label mapping every episode: passing it above chance is direct
 evidence the test-time memory works, since the mapping cannot live in the weights.
 
+## Proposers and solver optimisation
+
+The proposer is a pluggable interface (`lamb.selfplay.proposer.BaseProposer`):
+
+- **`bandit`** (default) — a learning-progress bandit, `softmax(beta * 4 s (1-s))`.
+  Robust, stateless, cannot collapse. Recommended for the small demo grid.
+- **`grpo_hyper`** — a **hypernetwork** mapping solver competence to the task
+  distribution, trained by **GRPO** with a **KL anchor to the bandit** (the anchor
+  is what averts the documented "proposer drifts to trivial/unsolvable tasks"
+  collapse). It concentrates on the highest-learnability cell and tracks the
+  frontier; its payoff over the tabular bandit is generalization on large/
+  continuous task spaces.
+
+Solver: **expert iteration** (default; teacher forcing on verified traces) or a
+**GRPO/RLVR** term (`--solver grpo`, added on top after a warm start, with DAPO
+dynamic sampling and an optional Dr.GRPO no-std normalization).
+
+## Benchmarks
+
+MMLU and general-LLM suites do not apply to a number-native math specialist. The
+right battery — length generalization, latent-reasoning tasks, long-context
+recall (BABILong / needle), and self-improvement curves — is described in
+[`docs/BENCHMARKS.md`](docs/BENCHMARKS.md). A length-generalization eval ships in
+`lamb.eval.length_generalization`.
+
 ## Extending
 
-See [`docs/ROADMAP.md`](docs/ROADMAP.md). The proposer is an injectable interface;
-the headline planned upgrade is a **GRPO-trained hypernetwork proposer** that keeps
-the bandit as its stability anchor, plus GRPO/RLVR on the solver so proposer and
-solver co-evolve over a combinatorial task space.
+See [`docs/ROADMAP.md`](docs/ROADMAP.md) for the deeper-memory (ATLAS), full
+Coconut continuous-thought, richer task-space, and language-bridge directions.
 
 ## License
 

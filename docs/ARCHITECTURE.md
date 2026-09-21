@@ -110,6 +110,31 @@ distribution is a fixed function of learnability plus a uniform floor).
 
 Optimisation: AdamW, warmup + cosine decay to 10% of peak, gradient clipping.
 
+## 6. GRPO co-evolution (optional)
+
+Both the proposer and the solver can be trained by **GRPO** (Group Relative
+Policy Optimization): critic-free, with a sample's advantage computed relative to
+a *group* drawn from the same state, `A_i = (r_i - mean) / std`. Utilities live in
+`lamb/selfplay/grpo.py`, with **DAPO** dynamic sampling (drop zero-variance
+groups) and an optional **Dr.GRPO** no-std normalization (avoid difficulty bias).
+
+**Solver GRPO/RLVR** (`solver_algo="grpo"`). For each problem, sample `G` answers,
+score them with the exact verifier, form group-relative advantages, and add
+`-A_i * sum_t log pi(o_{i,t}) + beta * KL(pi || pi_ref)` (k3 KL to a periodically
+refreshed reference) to the expert-iteration cross-entropy. The expert term is a
+warm start that avoids the RL cold-start where nothing is ever solved.
+
+**Hypernetwork proposer** (`proposer_kind="grpo_hyper"`,
+`lamb/selfplay/hyperproposer.py`). A small hypernetwork maps the solver-competence
+state `s` to task-distribution logits; the step's proposals form one GRPO group
+with learnability rewards; the update is anchored by `KL(pi || bandit)`. The KL
+anchor to the non-collapsing bandit is what prevents the drift-to-trivial/
+unsolvable failure that plagues bare self-play proposers. On the small demo grid
+the policy concentrates on the highest-learnability cell (the correct frontier
+target) with the `eps` floor preserving coverage; its advantage over the tabular
+bandit is generalization across large/continuous task spaces, where a per-cell
+table does not fit. The bandit remains the recommended default.
+
 ## Defaults
 
 Tiny CPU-first model: `d_model=128`, 1 prelude / 1 recurrent / 1 coda block,

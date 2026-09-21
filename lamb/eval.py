@@ -58,6 +58,37 @@ def evaluate(
 
 
 @torch.no_grad()
+def length_generalization(
+    model: LAMb,
+    tokenizer: ArithmeticTokenizer,
+    ops: Tuple[str, ...],
+    max_test_digits: int,
+    train_max_digits: int,
+    n_per_cell: int = 48,
+    device: str = "cpu",
+    seed: int = 4321,
+    n_steps: Optional[int] = None,
+) -> Dict[int, float]:
+    """Exact-match accuracy by operand digit width, including widths beyond training.
+
+    The single most diagnostic benchmark for the number-native design: train on
+    ``<= train_max_digits`` and read off how accuracy holds (or decays) as operands
+    grow to ``max_test_digits``. Each key is a digit width ``d`` (both operands ``d``
+    wide); widths ``> train_max_digits`` are extrapolation.
+    """
+    out: Dict[int, float] = {}
+    budget = 2 * max_test_digits + 2
+    for d in range(1, max_test_digits + 1):
+        grid = [(op, d, d) for op in ops]
+        res = evaluate(
+            model, tokenizer, grid, n_per_cell=n_per_cell, device=device, seed=seed + d,
+            n_steps=n_steps, max_answer_len=budget,
+        )
+        out[d] = float(res["overall"])
+    return out
+
+
+@torch.no_grad()
 def test_time_scaling(
     model: LAMb,
     tokenizer: ArithmeticTokenizer,

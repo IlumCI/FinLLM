@@ -133,6 +133,35 @@ class ArithmeticTokenizer:
         enc.ans_start = len(enc.ids)
         return enc
 
+    def build_from_answer_ids(self, problem: str, answer_ids: List[int]) -> Encoded:
+        """Build a full teacher-forcing example from *sampled* answer token ids.
+
+        Used by GRPO: the answer comes from the policy's own rollout (a token id
+        list, possibly ending in EOS) rather than a ground-truth string, so we
+        splice those exact tokens onto the problem prompt and compute their
+        Abacus positions incrementally. An EOS is appended if the rollout did not
+        already end with one, so the example always has a supervised final token.
+        """
+        enc = self.encode_prompt(problem)
+        prev_id = enc.ids[-1] if enc.ids else None
+        prev_ab = enc.abacus[-1] if enc.abacus else 0
+        ended = False
+        for tid in answer_ids:
+            if tid in (self.PAD,):
+                continue
+            ab = self.abacus_after(prev_id, prev_ab, tid)
+            enc.ids.append(tid)
+            enc.abacus.append(ab)
+            enc.value.append(0.0)
+            enc.value_mask.append(0.0)
+            prev_id, prev_ab = tid, ab
+            if tid == self.EOS:
+                ended = True
+                break
+        if not ended:
+            self._emit_symbol(enc, self.EOS)
+        return enc
+
     # -- decoding ---------------------------------------------------------
     def decode_answer(self, ids: List[int]) -> Optional[str]:
         """Turn a generated answer token span into a canonical integer string.

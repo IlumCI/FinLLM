@@ -1,52 +1,72 @@
-"""Task proposer -- the challenger in LAMb's self-play.
+"""Task proposers -- the challenger in LAMb's self-play.
 
-A *learning-progress bandit* over a discrete grid of difficulty cells ``(op,
-a_digits, b_digits)``. Each cell has a learnability score ``L = 4*s*(1-s)``
-(``s`` = the solver's smoothed success rate on that cell), which peaks when the
-solver gets it right about half the time and vanishes for cells that are already
-mastered (``s->1``) or still impossible (``s->0``). The proposer samples from
+All proposers share one interface, so the trainer can swap them freely:
 
-    p  =  (1 - eps) * softmax(beta * L)  +  eps * uniform
+    probs(s)            -> np.ndarray        distribution over difficulty cells
+    sample(n, s)        -> list[int]         n cell indices
+    entropy(s)          -> float
+    update(s, cells, r) -> dict              learn from (state, actions, rewards)
 
-so probability mass rides the *frontier* -- the band of currently-learnable
-cells -- and, because a mastered cell's ``L`` collapses to zero, automatically
-moves on to harder cells as the solver improves. The ``eps`` floor guarantees
-every cell keeps a trickle of exposure. This is the challenger-solver
-co-evolution of Absolute-Zero / R-Zero cast as automatic curriculum learning
-(learning-progress-driven task selection); it needs no external data and, unlike
-a REINFORCE policy, cannot collapse. A fully neural proposer trained by RL is a
-documented upgrade path.
+``s`` is the per-cell **solver-competence state** (smoothed success rate). The
+default :class:`BanditProposer` is a stateless *learning-progress bandit*
+(``softmax(beta * 4 s (1-s))``): it rides the learnable frontier, cannot collapse
+(a mastered cell's learnability -> 0, so mass moves on), and has no parameters to
+train. The GRPO-trained hypernetwork proposer
+(:class:`lamb.selfplay.hyperproposer.GRPOHyperProposer`) implements the same
+interface and uses the bandit as its stability anchor.
 """
 
 from __future__ import annotations
 
 import random
-from typing import List, Tuple
+from typing import Dict, List, Optional
 
 import numpy as np
 
 
-class Proposer:
+def learnability(s: np.ndarray) -> np.ndarray:
+    """Goldilocks learning-progress score 4 s (1-s): peaks at s=0.5, zero at 0/1."""
+    s = np.asarray(s, dtype=np.float64)
+    return 4.0 * s * (1.0 - s)
+
+
+class BaseProposer:
+    """Interface shared by every proposer. ``update`` is a no-op by default."""
+
+    def probs(self, s: np.ndarray) -> np.ndarray:  # pragma: no cover - abstract
+        raise NotImplementedError
+
+    def sample(self, n: int, s: np.ndarray) -> List[int]:  # pragma: no cover - abstract
+        raise NotImplementedError
+
+    def entropy(self, s: np.ndarray) -> float:
+        p = self.probs(s)
+        return float(-(p * np.log(p + 1e-12)).sum())
+
+    def update(self, s: np.ndarray, cells: List[int], rewards: List[float]) -> Dict[str, float]:
+        return {}
+
+
+class BanditProposer(BaseProposer):
     def __init__(self, n_cells: int, temperature: float = 6.0, eps: float = 0.35,
-                 rng: random.Random | None = None):
+                 rng: Optional[random.Random] = None):
         self.n_cells = n_cells
         self.temperature = temperature
         self.eps = eps
         self.rng = rng or random.Random()
 
-    def probs(self, learnability: np.ndarray) -> np.ndarray:
-        z = self.temperature * np.asarray(learnability, dtype=np.float64)
+    def probs(self, s: np.ndarray) -> np.ndarray:
+        z = self.temperature * learnability(s)
         z -= z.max()
         e = np.exp(z)
         p = e / e.sum()
         p = (1.0 - self.eps) * p + self.eps / self.n_cells
         return p / p.sum()
 
-    def sample(self, n: int, learnability: np.ndarray) -> Tuple[List[int], np.ndarray]:
-        p = self.probs(learnability)
-        cells = self.rng.choices(range(self.n_cells), weights=p.tolist(), k=n)
-        return cells, p
+    def sample(self, n: int, s: np.ndarray) -> List[int]:
+        p = self.probs(s)
+        return self.rng.choices(range(self.n_cells), weights=p.tolist(), k=n)
 
-    def entropy(self, learnability: np.ndarray) -> float:
-        p = self.probs(learnability)
-        return float(-(p * np.log(p + 1e-12)).sum())
+
+# Backwards-compatible alias.
+Proposer = BanditProposer

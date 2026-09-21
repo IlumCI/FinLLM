@@ -94,15 +94,22 @@ class LAMb(nn.Module):
 
     # -- inference --------------------------------------------------------
     @torch.no_grad()
-    def solve(
+    def _generate_ids(
         self,
         problems: List[str],
         tokenizer: ArithmeticTokenizer,
         max_answer_len: int = 20,
         n_steps: Optional[int] = None,
         device: str = "cpu",
-    ) -> List[Optional[str]]:
-        """Greedy-decode an answer for each problem. Batched via left-padding."""
+        greedy: bool = True,
+        temperature: float = 1.0,
+    ) -> List[List[int]]:
+        """Autoregressively decode answer token ids for each problem (batched).
+
+        Greedy when ``greedy`` else multinomial at ``temperature``. Returns, per
+        problem, the generated answer token ids up to and including EOS (trailing
+        padding stripped) -- the raw material for both ``solve`` and GRPO.
+        """
         self.eval()
         prompts = [tokenizer.encode_prompt(p) for p in problems]
         width = max(len(p) for p in prompts)
@@ -125,7 +132,12 @@ class LAMb(nn.Module):
         done = torch.zeros(b, dtype=torch.bool, device=device)
         for _ in range(max_answer_len):
             logits, _ = self.forward(ids, abacus, value, vmask, pad, n_steps)
-            nxt = logits[:, -1, :].argmax(dim=-1)  # (B,)
+            step_logits = logits[:, -1, :]
+            if greedy:
+                nxt = step_logits.argmax(dim=-1)
+            else:
+                probs = torch.softmax(step_logits / max(temperature, 1e-6), dim=-1)
+                nxt = torch.multinomial(probs, num_samples=1).squeeze(1)
             nxt = torch.where(done, torch.full_like(nxt, tokenizer.PAD), nxt)
 
             prev_id = ids[:, -1]
@@ -144,11 +156,48 @@ class LAMb(nn.Module):
             if bool(done.all()):
                 break
 
-        out: List[Optional[str]] = []
-        gen = ids[:, answer_start:].tolist()
-        for row in gen:
-            out.append(tokenizer.decode_answer(row))
+        out: List[List[int]] = []
+        for row in ids[:, answer_start:].tolist():
+            answer: List[int] = []
+            for tid in row:
+                if tid == tokenizer.PAD:
+                    break
+                answer.append(tid)
+                if tid == tokenizer.EOS:
+                    break
+            out.append(answer)
         return out
+
+    @torch.no_grad()
+    def solve(
+        self,
+        problems: List[str],
+        tokenizer: ArithmeticTokenizer,
+        max_answer_len: int = 20,
+        n_steps: Optional[int] = None,
+        device: str = "cpu",
+    ) -> List[Optional[str]]:
+        """Greedy-decode and return the answer string for each problem."""
+        gen = self._generate_ids(
+            problems, tokenizer, max_answer_len, n_steps, device, greedy=True
+        )
+        return [tokenizer.decode_answer(ids) for ids in gen]
+
+    @torch.no_grad()
+    def sample(
+        self,
+        problems: List[str],
+        tokenizer: ArithmeticTokenizer,
+        max_answer_len: int = 20,
+        n_steps: Optional[int] = None,
+        device: str = "cpu",
+        temperature: float = 1.0,
+    ) -> List[List[int]]:
+        """Sample answer token ids (for GRPO rollouts)."""
+        return self._generate_ids(
+            problems, tokenizer, max_answer_len, n_steps, device, greedy=False,
+            temperature=temperature,
+        )
 
 
 def build_model(cfg: ModelConfig, tokenizer: ArithmeticTokenizer) -> LAMb:
