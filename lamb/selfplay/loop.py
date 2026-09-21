@@ -35,8 +35,10 @@ from ..data import collate
 from ..model.lamb import LAMb
 from ..tokenizer import ArithmeticTokenizer
 from . import grpo as grpo_utils
+from .factoredhyper import FactoredHyperProposer
 from .hyperproposer import GRPOHyperProposer
 from .league import League
+from .openended import build_curriculum
 from .proposer import BanditProposer, BaseProposer, learnability
 from .verifier import Verifier
 
@@ -54,11 +56,6 @@ class StepStats:
     extra: Dict[str, float] = field(default_factory=dict)
 
 
-def _answer_budget(cfg: TrainConfig) -> int:
-    span = 2 * cfg.max_digits + 2 if "*" in cfg.ops else cfg.max_digits + 2
-    return span + 1  # room for a sign / EOS
-
-
 class SelfPlayTrainer:
     def __init__(
         self,
@@ -71,10 +68,11 @@ class SelfPlayTrainer:
         self.model = model
         self.tok = tokenizer
         self.verifier = Verifier()
-        self.grid: List[Tuple[str, int, int]] = cfg.difficulty_grid()
-        # The proposer is injectable and swappable via cfg.proposer_kind. Both
-        # implementations share the BaseProposer interface: the learning-progress
-        # bandit (default), or the GRPO-trained hypernetwork anchored to it.
+        # Curriculum: the fixed grid, or the open-ended grammar (append-only,
+        # MCC-admitted). The trainer is agnostic to which; both expose the same
+        # descriptor interface.
+        self.curriculum = build_curriculum(cfg)
+        # The proposer is injectable and swappable via cfg.proposer_kind.
         self.proposer = proposer or self._build_proposer()
 
         self.opt = torch.optim.AdamW(model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
@@ -88,19 +86,38 @@ class SelfPlayTrainer:
 
         # Red Queen: historical-self-play league + per-cell visitation for novelty.
         self.league: Optional[League] = League(cfg.league_capacity) if cfg.red_queen else None
-        self.visit_ema = np.zeros(len(self.grid), dtype=np.float64)
+        self.visits: Dict[int, float] = defaultdict(float)
 
         self.buffer: deque = deque(maxlen=cfg.buffer_capacity)
-        self.success_ema: Dict[int, float] = {i: 0.0 for i in range(len(self.grid))}
+        self.success_ema: Dict[int, float] = defaultdict(float)
         self._rng = random.Random(cfg.seed)
         self._seed_ctr = 1
-        self._answer_len = _answer_budget(cfg)
+        self._answer_len = self.curriculum.answer_budget()
         self.step = 0
+
+    def _n(self) -> int:
+        return len(self.curriculum.descriptors())
+
+    @property
+    def grid(self):
+        """The current descriptor list (fixed-grid cells or open-ended descriptors)."""
+        return self.curriculum.descriptors()
 
     def _build_proposer(self) -> BaseProposer:
         cfg = self.cfg
-        n = len(self.grid)
+        n = self._n()
+        if cfg.proposer_kind == "factored_hyper":
+            if not cfg.open_ended:
+                raise ValueError("proposer 'factored_hyper' requires open_ended=True")
+            return FactoredHyperProposer(
+                self.curriculum, hidden=cfg.factored_hidden, eps=cfg.proposer_eps,
+                kl_coef=cfg.hyper_kl_coef, entropy_coef=cfg.hyper_entropy_coef, lr=cfg.hyper_lr,
+                rng=random.Random(cfg.seed + 1),
+            )
         if cfg.proposer_kind == "grpo_hyper":
+            if cfg.open_ended:
+                raise ValueError("proposer 'grpo_hyper' has fixed size; use 'factored_hyper' or "
+                                 "'bandit' with open_ended=True")
             return GRPOHyperProposer(
                 n, hidden=cfg.hyper_hidden, eps=cfg.proposer_eps, bandit_temp=cfg.proposer_temp,
                 kl_coef=cfg.hyper_kl_coef, entropy_coef=cfg.hyper_entropy_coef, lr=cfg.hyper_lr,
@@ -129,31 +146,29 @@ class SelfPlayTrainer:
 
     def _state(self) -> np.ndarray:
         """The per-cell solver-competence state (smoothed success), the proposer input."""
-        return np.array([self.success_ema[i] for i in range(len(self.grid))], dtype=np.float64)
+        return np.array([self.success_ema[i] for i in range(self._n())], dtype=np.float64)
 
     def _novelty(self) -> np.ndarray:
         """Count-based novelty from EMA visitation (higher = less recently proposed)."""
-        nov = 1.0 / np.sqrt(1e-3 + self.visit_ema)
+        visit = np.array([self.visits[i] for i in range(self._n())], dtype=np.float64)
+        nov = 1.0 / np.sqrt(1e-3 + visit)
         return nov / (nov.max() + 1e-9)  # normalized to (0, 1]
 
     def _sample_cells(self, n: int, state: np.ndarray) -> List[int]:
+        m = self._n()
         if self.step < self.cfg.proposer_warmup:
-            return [self._rng.randrange(len(self.grid)) for _ in range(n)]
+            return [self._rng.randrange(m) for _ in range(n)]
         p = self.proposer.probs(state)
         # Diversity maintenance: up-weight rarely-visited cells so the arms race
         # keeps exploring the frontier instead of collapsing onto one region.
-        if self.cfg.red_queen and self.cfg.novelty_coef > 0 and len(self.grid) > 1:
+        if self.cfg.red_queen and self.cfg.novelty_coef > 0 and m > 1:
             nov = self._novelty() - self._novelty().mean()
             p = p * np.exp(self.cfg.novelty_coef * nov)
             p = p / p.sum()
-        return self._rng.choices(range(len(self.grid)), weights=p.tolist(), k=n)
+        return self._rng.choices(range(m), weights=p.tolist(), k=n)
 
     def _mastered_frontier(self) -> int:
-        frontier = 0
-        for i, (_, a, b) in enumerate(self.grid):
-            if self.success_ema[i] >= self.cfg.mastery_threshold:
-                frontier = max(frontier, a + b)
-        return frontier
+        return int(self.curriculum.mastered_frontier(self.success_ema))
 
     def _grpo_term(self, problems: List[str]) -> Tuple[Optional[torch.Tensor], Dict[str, float]]:
         cfg = self.cfg
@@ -177,14 +192,16 @@ class SelfPlayTrainer:
         problems: List[str] = []
         answers: List[str] = []
         for idx in cells:
-            op, a, b = self.grid[idx]
-            expr, ans = self.verifier.sample(op, a, b, self._next_seed())
+            expr, ans = self.curriculum.sample(idx, self._next_seed())
             problems.append(expr)
             answers.append(ans)
 
         # Track per-cell visitation (EMA) for the novelty / diversity term.
-        counts = np.bincount(cells, minlength=len(self.grid)).astype(np.float64) / max(1, len(cells))
-        self.visit_ema = cfg.novelty_decay * self.visit_ema + (1.0 - cfg.novelty_decay) * counts
+        for i in range(self._n()):
+            self.visits[i] *= cfg.novelty_decay
+        inc = (1.0 - cfg.novelty_decay) / max(1, len(cells))
+        for c in cells:
+            self.visits[c] += inc
 
         examples = [self.tok.encode(p, a) for p, a in zip(problems, answers)]
         # Expert-iteration replay: mix in previously solved traces.
@@ -246,6 +263,11 @@ class SelfPlayTrainer:
             prop_metrics = self.proposer.update(state, cells, [reward_vec[c] for c in cells])
             extra.update(prop_metrics)
 
+        # Open-ended growth: minimal-criterion admission of harder neighbours.
+        if cfg.open_ended and (self.step + 1) % cfg.admit_every == 0:
+            self.curriculum.admit(self.success_ema)
+        extra["n_tasks"] = float(self._n())
+
         if self.league is not None:
             extra["league_size"] = float(len(self.league))
 
@@ -260,7 +282,7 @@ class SelfPlayTrainer:
             mastered_frontier=self._mastered_frontier(),
             buffer_size=len(self.buffer),
             proposer_entropy=self.proposer.entropy(post),
-            top_cell="{}{}x{}".format(*self.grid[top_idx]),
+            top_cell=self.curriculum.label(top_idx),
             extra=extra,
         )
         return stats
@@ -273,11 +295,12 @@ class SelfPlayTrainer:
             return None
         state = self._state()
         p = self.proposer.probs(state)
-        frontier_cells = self._rng.choices(range(len(self.grid)), weights=p.tolist(), k=n)
+        frontier_cells = self._rng.choices(range(self._n()), weights=p.tolist(), k=n)
         frontier = [self._instance(c) for c in frontier_cells]
 
-        easy = [i for i, (_, a, b) in enumerate(self.grid)
-                if a == self.cfg.start_digits and b == self.cfg.start_digits] or list(range(len(self.grid)))
+        # Retention set: the lowest-complexity descriptors (the earliest skills).
+        order = sorted(range(self._n()), key=self.curriculum.complexity)
+        easy = order[: max(1, len(order) // 4)]
         retention = [self._instance(self._rng.choice(easy)) for _ in range(n)]
 
         return self.league.relative_fitness(
@@ -286,8 +309,7 @@ class SelfPlayTrainer:
         )
 
     def _instance(self, cell_idx: int) -> Tuple[str, str]:
-        op, a, b = self.grid[cell_idx]
-        return self.verifier.sample(op, a, b, self._next_seed())
+        return self.curriculum.sample(cell_idx, self._next_seed())
 
     def _update_success_ema(self, cells: List[int], correct: List[bool]) -> None:
         per_cell: Dict[int, List[float]] = defaultdict(list)

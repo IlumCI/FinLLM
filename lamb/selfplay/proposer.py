@@ -56,16 +56,19 @@ class BanditProposer(BaseProposer):
         self.rng = rng or random.Random()
 
     def probs(self, s: np.ndarray) -> np.ndarray:
+        # Size-agnostic: works over whatever number of cells `s` describes, so an
+        # append-only open-ended space grows under it without reconstruction.
+        m = len(s)
         z = self.temperature * learnability(s)
         z -= z.max()
         e = np.exp(z)
         p = e / e.sum()
-        p = (1.0 - self.eps) * p + self.eps / self.n_cells
+        p = (1.0 - self.eps) * p + self.eps / m
         return p / p.sum()
 
     def sample(self, n: int, s: np.ndarray) -> List[int]:
         p = self.probs(s)
-        return self.rng.choices(range(self.n_cells), weights=p.tolist(), k=n)
+        return self.rng.choices(range(len(s)), weights=p.tolist(), k=n)
 
 
 # Backwards-compatible alias.

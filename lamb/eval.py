@@ -58,6 +58,51 @@ def evaluate(
 
 
 @torch.no_grad()
+def evaluate_curriculum(
+    model: LAMb,
+    tokenizer: ArithmeticTokenizer,
+    curriculum,
+    n_per_cell: int = 16,
+    device: str = "cpu",
+    seed: int = 1234,
+    n_steps: Optional[int] = None,
+    max_answer_len: int = 20,
+) -> Dict[str, object]:
+    """Held-out accuracy over any curriculum (fixed grid or open-ended grammar).
+
+    Draws fresh instances of every current descriptor and scores greedy solutions
+    against the exact answers the curriculum itself provides.
+    """
+    import random
+    from collections import defaultdict
+
+    model.eval()
+    rng = random.Random(seed)
+    descs = curriculum.descriptors()
+    problems: List[str] = []
+    answers: List[str] = []
+    cell_of: List[int] = []
+    for ci in range(len(descs)):
+        for _ in range(n_per_cell):
+            expr, ans = curriculum.sample(ci, rng.randint(0, 2**31 - 1))
+            problems.append(expr)
+            answers.append(ans)
+            cell_of.append(ci)
+
+    preds = model.solve(problems, tokenizer, max_answer_len=max_answer_len, n_steps=n_steps, device=device)
+    correct: Dict[int, int] = defaultdict(int)
+    total: Dict[int, int] = defaultdict(int)
+    n_ok = 0
+    for ci, ans, pred in zip(cell_of, answers, preds):
+        ok = pred is not None and pred == ans
+        correct[ci] += int(ok)
+        total[ci] += 1
+        n_ok += int(ok)
+    per_cell = {curriculum.label(ci): correct[ci] / total[ci] for ci in total}
+    return {"overall": n_ok / max(1, len(problems)), "per_cell": per_cell}
+
+
+@torch.no_grad()
 def length_generalization(
     model: LAMb,
     tokenizer: ArithmeticTokenizer,

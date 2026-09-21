@@ -157,9 +157,33 @@ past on an ever-advancing frontier. Step 1 adds the minimal, measurable machiner
   a fixed easy set; > 0 means regression). On a bounded grid `dominance` decays to
   0 as the space saturates -- the signal that an open-ended task space is needed.
 
-Roadmap Steps 2-3 (a generative task grammar with minimal-criterion admission,
-then a full POET-style population of (task, solver) pairs with transfer) build on
-this; see `docs/ROADMAP.md`.
+## 8. Open-ended task grammar (Red Queen Step 2)
+
+Enabled with `open_ended=True`. The fixed grid is replaced by a generative
+grammar (`lamb/selfplay/grammar.py`) of nested arithmetic expressions whose
+complexity grows without bound along depth, operand width, and operator set. The
+descriptor space (`lamb/selfplay/openended.py`) is **append-only** and grown by
+**minimal-criterion admission**: a descriptor's harder neighbours (deeper, wider,
+richer ops) are admitted only once the descriptor itself is mastered, with the
+exact verifier guaranteeing every admitted task is well-posed. The reachable
+space therefore expands purely as a function of the solver's own competence.
+
+Because the descriptor set grows, the grid hypernetwork (fixed output per cell)
+no longer fits. The **factored hypernetwork proposer** (`factoredhyper.py`) emits
+independent softmaxes over depth, digits, and operator set from a fixed-width
+competence context, so a combinatorial space of `D*G*O` descriptors costs only
+`D+G+O` outputs -- the concrete sense in which the hypernetwork beats a table
+once the space is open-ended. It is GRPO-trained with a KL anchor to a
+uniform-over-admitted factored prior.
+
+Measured behaviour on the tiny CPU model: the space grows (tasks 1 -> 6), the
+mastered frontier advances (0 -> 4), and `forgetting` stays 0. Unlike Step 1's
+fixed grid -- where `dominance` decayed to 0 from *task-space saturation* --
+`dominance` here is bounded instead by *solver capacity* (the tiny model caps out
+around depth-2 nested expressions). The ceiling has moved from the curriculum to
+the model, which is the intended effect; sustained positive `dominance` is a
+scale-up (larger solver) result. Step 3 (a POET-style population of (task,
+solver) pairs with transfer) is the next roadmap item.
 
 ## Defaults
 

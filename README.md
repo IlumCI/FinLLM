@@ -46,6 +46,7 @@ python -m lamb.train --use-memory        # enable the test-time memory in the co
 python -m lamb.train --proposer grpo_hyper   # GRPO-trained hypernetwork proposer
 python -m lamb.train --solver grpo           # add a GRPO/RLVR term on the solver
 python -m lamb.train --red-queen             # Red Queen coevolution (league + novelty + relative fitness)
+python -m lamb.train --red-queen --open-ended --proposer factored_hyper   # open-ended grammar (Step 2)
 ```
 
 You will watch, from zero data:
@@ -72,6 +73,9 @@ lamb/                     Python package (torch)
   selfplay/
     proposer.py           learning-progress bandit (default; pluggable interface)
     hyperproposer.py      GRPO-trained hypernetwork proposer, bandit-anchored
+    factoredhyper.py      factored GRPO proposer for the open-ended space
+    grammar.py            generative grammar of nested expressions
+    openended.py          curricula: fixed grid + open-ended (MCC admission)
     grpo.py               GRPO utilities + solver RLVR objective (DAPO/Dr.GRPO options)
     league.py             Red Queen: solver league + relative-fitness metrics
     verifier.py           exact reward oracle (wraps the Rust kernels)
@@ -113,12 +117,17 @@ Solver: **expert iteration** (default; teacher forcing on verified traces) or a
 **GRPO/RLVR** term (`--solver grpo`, added on top after a warm start, with DAPO
 dynamic sampling and an optional Dr.GRPO no-std normalization).
 
-**Red Queen coevolution** (`--red-queen`, roadmap Step 1): a solver **league**
-(historical self-play), a **novelty** term (diversity maintenance), and
-relative-fitness metrics — `dominance` (does the solver keep beating its past on
-the current frontier?) and `forgetting`. On the bounded demo grid `dominance`
-decays to 0 as the space saturates, which is the measured motivation for an
-open-ended task grammar (Step 2). Grounded in Digital Red Queen and POET/MCC.
+**Red Queen coevolution.** Step 1 (`--red-queen`): a solver **league** (historical
+self-play), a **novelty** term (diversity maintenance), and relative-fitness
+metrics — `dominance` (does the solver keep beating its past on the current
+frontier?) and `forgetting`. On the bounded grid `dominance` decays to 0 as the
+space saturates. Step 2 (`--open-ended --proposer factored_hyper`): a generative
+grammar of nested expressions grown by **minimal-criterion admission**, with a
+**factored** hypernetwork proposer (fixed `D+G+O` outputs over an unbounded
+space). Measured: the space grows and the frontier advances with zero forgetting;
+`dominance` becomes bounded by *solver capacity* rather than task-space
+saturation — the ceiling moves from the curriculum to the model. Grounded in
+Digital Red Queen and POET/MCC.
 
 ## Benchmarks
 

@@ -112,6 +112,14 @@ class TrainConfig:
     novelty_coef: float = 0.5         # diversity-maintenance weight on task selection
     novelty_decay: float = 0.98       # EMA decay for per-cell visitation
 
+    # Open-ended task grammar (Red Queen Step 2): nested expressions with
+    # minimal-criterion admission, so the task space grows without bound.
+    open_ended: bool = False
+    oe_max_depth: int = 4     # cap on expression nesting depth (space grows up to here)
+    oe_max_digits: int = 4    # cap on operand width
+    admit_every: int = 25     # steps between MCC admission passes
+    factored_hidden: int = 64  # hidden width of the factored hypernetwork proposer
+
     eval_every: int = 100
     eval_batch: int = 256
     log_every: int = 50

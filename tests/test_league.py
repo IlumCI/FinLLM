@@ -72,6 +72,6 @@ def test_trainer_red_queen_runs():
 
     assert len(trainer.league) >= 2                 # snapshots accumulated
     assert "league_size" in stats.extra
-    assert trainer.visit_ema.sum() > 0.0            # novelty visitation is tracked
+    assert sum(trainer.visits.values()) > 0.0       # novelty visitation is tracked
     rq = trainer.red_queen_report()
     assert rq is not None and "dominance" in rq and "forgetting" in rq

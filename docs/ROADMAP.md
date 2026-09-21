@@ -57,15 +57,20 @@ the solver must keep dominating its own past on an ever-advancing frontier.
   metrics (`dominance`, `forgetting`) in `lamb/selfplay/league.py`. On the bounded
   grid, `dominance` starts positive and decays to 0 as the space saturates — the
   measured signal that motivates Step 2.
-- **Step 2 (next).** Replace the fixed grid with a **generative task grammar**
-  (nested expressions, growing depth/ops) so the space is genuinely open-ended;
-  the hypernetwork proposer generates *in* it, with **minimal-criterion
-  admission** gated by the exact verifier (a task is admitted only if it is novel
-  and just-barely solvable). This subsumes item 5 below. Refs: POET
-  ([1901.01753](https://arxiv.org/abs/1901.01753)); Minimal Criterion Coevolution
-  (Brant & Stanley).
-- **Step 3.** Full **POET-style population** of (task, solver) pairs with transfer
-  between them, and evaluation by relative fitness / frontier-advancement rate.
+- **Step 2 (implemented, `open_ended=True`).** A **generative grammar** of nested
+  expressions (`lamb/selfplay/grammar.py`) with an append-only descriptor space
+  grown by **minimal-criterion admission** (`openended.py`), and a **factored
+  hypernetwork proposer** (`factoredhyper.py`) that generates *in* that space with
+  fixed `D+G+O` outputs. Measured: the space grows and the frontier advances with
+  zero forgetting; `dominance` is now bounded by solver capacity rather than
+  task-space saturation (the ceiling moved from the curriculum to the model), so
+  sustained positive dominance is a scale-up result. This subsumes item 5 below.
+  Refs: POET ([1901.01753](https://arxiv.org/abs/1901.01753)); Minimal Criterion
+  Coevolution (Brant & Stanley).
+- **Step 3 (next).** Full **POET-style population** of (task, solver) pairs with
+  transfer between them; and, in tandem, scale the solver (roadmap item 7) so it
+  can keep climbing the now-unbounded frontier. Evaluate by relative fitness /
+  frontier-advancement rate.
 
 Refs: Digital Red Queen ([2601.03335](https://arxiv.org/abs/2601.03335));
 PopuLoRA ([2605.16727](https://arxiv.org/pdf/2605.16727)); learnable information
