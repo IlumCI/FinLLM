@@ -140,12 +140,41 @@ model it starves the gradient and collapses the thoughts to a constant, and sinc
 the grammar already supplies exact labels, teacher forcing already carries the
 verifier's information — so the verifier's unique leverage is at inference.
 
-Stage B (next): latent **inter-agent** communication — the message passed between
-agents *is* a Coconut thought vector (receiving = thinking another agent's
-thought), reusing this exact continuous-input path.
-
 Refs: Coconut ([2412.06769](https://arxiv.org/abs/2412.06769)); inference-time
 scaling for continuous-space reasoning ([2510.12167](https://arxiv.org/abs/2510.12167)).
+
+## 3b. Latent inter-agent communication (Coconut) — Stage B implemented
+
+Implemented in `lamb/comm.py` (`python -m lamb.comm`). The message passed between
+two agents *is* a Coconut thought vector: the speaker rolls latent thoughts from
+its half of a split problem, a differentiable `Channel` carries those continuous
+vectors, and the listener consumes them as latent input positions (receiving =
+thinking another agent's thought) and answers — reusing Stage A's exact
+continuous-input path. No token is ever exchanged; the channel is a pure-latent
+blackbox.
+
+**Split task**: the speaker sees operand `X`, the listener sees `op` and `Y` and
+must emit `X op Y` — impossible without the message. Training is one joint
+objective (the listener's answer cross-entropy) back-propagated *through the
+message* into the speaker: differentiable inter-agent learning (DIAL,
+arXiv:1605.06676) with Coconut thoughts as the message — a combination the recent
+latent-agent-communication papers (Interlat arXiv:2511.09149, DiffMAS
+arXiv:2604.21794) approach but none train as the Coconut recurrence driven
+end-to-end across the agent boundary.
+
+Measured (tiny CPU pair, 1-digit `X,Y`, `+/−`, noiseless channel): exact-match
+`comm 1.000` vs a zeroed-message ablation `0.098` (the guess-`X` prior) — a
+`+0.90` causal channel gain (the positive-*listening* test of arXiv:1903.05168).
+Two agents solve, purely in latent space, a task neither can solve alone. A
+`channel_noise>0` (DIAL DRU) bandwidth sweep shows a sharp capacity threshold
+(width `1/2/4` at the `~0.10` prior, `8/96 → 1.000`: a 1-digit operand needs `≥8`
+noisy channel dimensions); message diagnostics (`signal_std`, `msg_cos`) guard
+against the representational collapse of arXiv:2604.03809. `python -m lamb.comm --sweep`.
+
+Refs: DIAL ([1605.06676](https://arxiv.org/abs/1605.06676)); pitfalls of measuring
+emergent communication ([1903.05168](https://arxiv.org/abs/1903.05168));
+Interlat ([2511.09149](https://arxiv.org/abs/2511.09149)); DiffMAS
+([2604.21794](https://arxiv.org/abs/2604.21794)).
 
 ## 4. Deeper test-time memory (ATLAS)
 

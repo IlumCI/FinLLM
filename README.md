@@ -52,6 +52,8 @@ python -m lamb.poet_shared                    # shared-backbone POET (DoRA adapt
 python -m lamb.memory_bench                   # long-context needle/passkey retrieval (infContext)
 python -m lamb.ruler_bench                     # RULER/BABILong-style suite (NIAH, multi-key, variable tracking)
 python -m lamb.coconut                         # Coconut continuous-thought reasoning + verifier best-of-N (Stage A)
+python -m lamb.comm                            # latent inter-agent communication: message = a thought vector (Stage B)
+python -m lamb.comm --sweep                     # channel-bandwidth (capacity) sweep with DRU noise
 ```
 
 You will watch, from zero data:
@@ -88,6 +90,7 @@ lamb/                     Python package (torch)
     loop.py               Absolute-Zero-style self-play trainer
   eval.py                 held-out accuracy, length generalization, test-time scaling
   coconut.py              Coconut continuous-thought reasoning + verifier-selected best-of-N (Stage A)
+  comm.py                 latent inter-agent communication: speaker/listener + differentiable channel (Stage B)
   train.py                CPU-first end-to-end entry point (single-agent self-play)
   poet.py                 POET population of (environment, agent) pairs (Step 3)
   poet_shared.py          shared-backbone POET: one backbone + per-environment adapters

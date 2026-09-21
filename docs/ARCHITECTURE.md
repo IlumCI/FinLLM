@@ -303,6 +303,62 @@ labels at deploy. Nothing is verbalised; the verifier checks only the emitted
 number, so the thoughts stay a blackbox. Stage B reuses this continuous-input path
 for latent inter-agent messages (a message *is* a thought vector).
 
+## 11. Latent inter-agent communication (Stage B, `lamb/comm.py`)
+
+Stage A gave one agent a continuous-thought scratchpad. Stage B makes the thought
+a **message between two agents**: the vector one agent produces is consumed by
+another as an input embedding -- receiving is literally thinking someone else's
+thought, through the same `_roll_thoughts` interface.
+
+**Split task.** A problem neither agent can solve alone. The **speaker** sees
+operand `X`; the **listener** sees the operator and operand `Y` and must emit
+`X op Y`. The listener's half never contains `X`, so it cannot answer without the
+message -- a clean, verifiable information-asymmetry game over the model's native
+domain.
+
+**Channel.** The speaker rolls `n_msg` Coconut thoughts from its view of `X`;
+those continuous vectors pass through a differentiable `Channel`
+(`down: d→c`, `up: c→d`, RMSNorm, learned `recv_marker`) into the listener, which
+injects them as latent positions, optionally rolls its own thoughts, and decodes
+the answer. `c` is the **bandwidth** (bottleneck width). With `channel_noise>0`
+the code is tanh-bounded and Gaussian noise is added in training -- the DIAL
+**DRU** (arXiv:1605.06676), which gives the channel finite capacity and pushes the
+sender toward a robust code; noiseless (`c=d`) is a clean high-capacity channel.
+
+**Training is differentiable inter-agent learning (DIAL).** One joint objective --
+the listener's answer cross-entropy -- is back-propagated *through the message*
+into the speaker, so the speaker learns to encode `X` in latent form purely from
+the listener's downstream loss. No token is ever exchanged; the channel is pure
+latent, a blackbox (the whole point of a latent-space model -- nothing is
+verbalised).
+
+**Diagnostics, following the emergent-communication literature.** Positive
+*signalling* (the message depends on `X`) and positive *listening* (the message
+changes the listener's output) are not the same, and high reward can hide a
+receiver that ignores the channel (arXiv:1903.05168). So two measures are
+reported:
+
+- **Zeroed-message ablation** (the causal listening test): blank the channel at
+  eval; the gap `comm − blank` is the channel's causal value.
+- **Message diagnostics**: `signal_std` (variation of the message across inputs;
+  ~0 => the speaker emits a constant) and `msg_cos` (mean pairwise cosine of the
+  messages; ~1 => collapsed to one direction -- the representational-collapse
+  detector of arXiv:2604.03809).
+
+Measured on the tiny CPU pair (`X,Y` 1-digit, `+/−`, `n_msg=2`, noiseless): the
+speaker learns a perfect latent code -- exact-match `comm 1.000` vs blanked
+`0.098` (the ~0.10 guess-`X` prior), a `+0.90` causal channel gain, with
+`signal_std` rising and `msg_cos` falling as the code forms. Two agents solve, in
+pure latent, a task neither can solve alone. Under DRU noise `0.5` the bandwidth
+sweep shows a sharp capacity threshold -- `width 1/2/4 -> 0.11/0.11/0.10` (stuck
+at the prior) then `width 8/96 -> 1.000/1.000`: a 1-digit operand needs `>= 8`
+noisy channel dimensions to transmit, the capacity--accuracy tradeoff a noiseless
+channel hides. This is the
+substrate the roadmap's language-bridge deliberately is not: agents that reason
+*and* communicate without ever leaving latent space. Grounded in DIAL
+(arXiv:1605.06676), Coconut (arXiv:2412.06769), and the latent-agent-communication
+line (Interlat arXiv:2511.09149, DiffMAS arXiv:2604.21794).
+
 ## Defaults
 
 Tiny CPU-first model: `d_model=128`, 1 prelude / 1 recurrent / 1 coda block,

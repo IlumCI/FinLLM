@@ -44,6 +44,25 @@ reversed vs. forward digits and Abacus on/off to attribute the gains.
     could not select; LAMb's verifier can). A test-time self-improvement loop.
   Covered by `tests/test_coconut.py` (incl. the `K=0` reduction to ordinary
   teacher forcing).
+- **Latent inter-agent communication (Stage B, shipped)** — `python -m lamb.comm`
+  (`lamb/comm.py`) measures whether two agents can communicate a value in *pure
+  latent space*. A speaker sees operand `X`, a listener sees `op` and `Y` and must
+  emit `X op Y`; the message is a Coconut thought vector through a differentiable
+  channel, trained end to end (DIAL). Reported:
+  - **Causal channel gain** — comm accuracy minus a zeroed-message ablation. On
+    1-digit `X,Y` (`+/−`), `comm 1.000` vs `blank 0.098` (the guess-`X` prior): a
+    `+0.90` gain that is the positive-*listening* test of arXiv:1903.05168 (high
+    reward with a receiver that ignores the channel is the classic false positive;
+    the ablation rules it out).
+  - **Bandwidth (capacity) sweep** — `--sweep` with DRU channel noise
+    (arXiv:1605.06676) trades channel width against accuracy (a noiseless
+    continuous channel has near-infinite capacity, so the sweep needs noise to be
+    meaningful). At noise `0.5` the threshold is sharp: channel width `1/2/4` stay
+    at the `~0.10` prior, then `8/96 → 1.000` — a 1-digit operand needs `≥ 8` noisy
+    channel dimensions to transmit.
+  - **Message diagnostics** — `signal_std` (does the message depend on `X`?) and
+    `msg_cos` (representational-collapse detector, arXiv:2604.03809).
+  Covered by `tests/test_comm.py`.
 - **ProntoQA / ProsQA** — the synthetic logical-reasoning sets Coconut used to
   show latent breadth-first reasoning beats token chain-of-thought. These need a
   task encoder but no general NL, so they fit LAMb's paradigm.

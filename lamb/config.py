@@ -201,6 +201,68 @@ class CoconutConfig:
 
 
 @dataclass
+class CommConfig:
+    """Stage B: latent inter-agent communication (message = a Coconut thought).
+
+    Two LAMb agents solve a split problem neither can solve alone. The **speaker**
+    sees operand ``X``; the **listener** sees the operator and operand ``Y`` and
+    must output ``X op Y``. The listener cannot recover the answer without ``X``,
+    so the speaker must communicate it -- but not in language. The speaker rolls
+    ``n_msg`` Coconut thought vectors (Stage A's mechanism) and those *continuous*
+    vectors, passed through a differentiable ``Channel``, are the message; the
+    listener consumes them as latent input positions (receiving = thinking another
+    agent's thought) and reasons on. The whole thing trains end to end: the
+    listener's answer-NLL back-propagates through the message into the speaker
+    (differentiable inter-agent learning, DIAL, arXiv:1605.06676). No token is
+    ever exchanged -- the channel is pure latent, a blackbox.
+
+    Diagnostics follow the emergent-communication literature: a **zeroed-message**
+    ablation (does accuracy collapse to the no-information prior when the channel
+    is blanked?) isolates the channel, and a **bandwidth sweep** over the channel
+    bottleneck traces the capacity-accuracy tradeoff.
+    """
+
+    steps: int = 1500
+    batch_size: int = 64
+    lr: float = 2e-3
+    weight_decay: float = 0.01
+    warmup: int = 60
+    grad_clip: float = 1.0
+    seed: int = 0
+    device: str = "cpu"
+
+    # Split task: speaker sees X (a_digits), listener sees op and Y (b_digits) and
+    # must output X op Y. Neither half determines the answer alone.
+    a_digits: int = 1
+    b_digits: int = 1
+    ops: Tuple[str, ...] = ("+", "-")
+
+    # Communication channel.
+    n_msg: int = 2               # number of latent message vectors the speaker emits
+    n_listen_thoughts: int = 1   # listener's own Coconut thoughts after receiving
+    bottleneck: int = 0          # channel width; 0 => full (= d_model). The bandwidth knob.
+    msg_dropout: float = 0.0     # optional latent-phase dropout on the speaker
+    channel_noise: float = 0.0   # DRU-style Gaussian noise on the bottleneck code (train only);
+                                 # >0 gives the channel finite capacity, so bandwidth trades off
+                                 # against accuracy (DIAL, arXiv:1605.06676). 0 => noiseless.
+
+    # Agents (kept small for a CPU pair).
+    d_model: int = 96
+    n_heads: int = 4
+    recurrent_steps: int = 4
+
+    # Evaluation.
+    eval_every: int = 200
+    eval_tasks: int = 512
+    eval_bottlenecks: Tuple[int, ...] = (1, 2, 4, 8, 0)  # bandwidth sweep (0 => full)
+    log_every: int = 100
+    ckpt_dir: str = "runs"
+
+    def max_answer_len(self) -> int:
+        return min(24, max(self.a_digits, self.b_digits) + 3)
+
+
+@dataclass
 class POETConfig:
     """Red Queen Step 3: a POET-style population of (environment, agent) pairs.
 
