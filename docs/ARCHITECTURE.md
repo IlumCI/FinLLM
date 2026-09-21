@@ -232,12 +232,15 @@ the LM head). A population of N environments then costs one backbone + N adapter
 environment -- accumulates cross-environment skill, so a reproduced environment
 inherits a competent backbone (implicit transfer); explicit transfer just copies
 the small adapter. The tradeoff is honest: parameter-efficient, but a final-layer
-adapter specialises less than a full model, so absolute mastery is lower on the
-tiny setup. A deeper **LoRA adapter** (`--adapter-type lora`, `lamb/model/lora.py`)
-injects low-rank updates into the core's attention linears via forward hooks (one
-`LoRASet` per environment, selected per forward); at equal budget it conquers the
-base frontier where the final-layer adapter does not, at ~4.5x the (still tiny)
-adapter parameters.
+adapter specialises less than a full model. **Deeper adapters** (`lamb/model/lora.py`,
+default) fix this by adapting the core's attention linears via forward hooks (one
+adapter set per environment, selected per forward): **LoRA** (additive low-rank
+delta) and **DoRA** (weight-decomposed, arXiv:2402.09353 -- the low-rank update
+adapts the *direction* while a separate magnitude vector is trained, `W' = m . (W
++ s.BA)/||W + s.BA||`, with the norm detached in backward). Both are exactly the
+identity at initialisation. At equal budget the best specialist reaches ~0.77
+(DoRA) vs ~0.53 (LoRA) vs ~0.50 (final-hidden) -- DoRA wins for one magnitude
+vector per layer on top of LoRA. `--adapter-type {dora,lora,hidden}`.
 
 ## Defaults
 

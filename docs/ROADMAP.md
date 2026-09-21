@@ -84,11 +84,13 @@ the solver must keep dominating its own past on an ever-advancing frontier.
   parameters of N full models at capacity 5), and the backbone accumulates
   cross-environment skill for implicit transfer. Measured: it grows, transfers, and
   conquers the base frontier, at lower absolute mastery than independent agents --
-  the honest efficiency/capacity tradeoff of a final-layer adapter. A **deeper
-  LoRA adapter** (`--adapter-type lora`, `lamb/model/lora.py`) is also available:
-  it injects low-rank updates into the core's attention linears (not just the
-  final hidden), and at equal budget conquers the base frontier where the shallow
-  adapter does not, at ~4.5x the (still tiny) adapter parameters.
+  the honest efficiency/capacity tradeoff of a final-layer adapter. **Deeper
+  adapters** (`lamb/model/lora.py`) that adapt the core's attention linears are
+  the default: **DoRA** (weight-decomposed, arXiv:2402.09353 -- magnitude/direction
+  decoupling) and LoRA. At equal budget the best specialist reaches ~0.77 (DoRA)
+  vs ~0.53 (LoRA) vs ~0.50 (final-hidden), for one magnitude vector per layer on
+  top of LoRA -- DoRA is the clear winner, as in the paper. `--adapter-type
+  {dora,lora,hidden}`.
 - **Behavioural-novelty admission (implemented, `lamb/selfplay/novelty.py`).** Both
   POET variants gate reproduction on *behaviour*, not descriptor dedup: each
   candidate environment is characterised by its seed agent's competence across

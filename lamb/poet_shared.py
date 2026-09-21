@@ -80,8 +80,9 @@ class SharedBackbonePOETTrainer:
         # final-hidden bottleneck. One injector serves the whole population; each
         # member owns its own LoRASet, selected per forward via set_active.
         self.injector: Optional[LoRAInjector] = (
-            LoRAInjector(self.backbone, cfg.lora_targets, cfg.lora_rank, cfg.lora_alpha)
-            if cfg.adapter_type == "lora" else None
+            LoRAInjector(self.backbone, cfg.lora_targets, cfg.lora_rank, cfg.lora_alpha,
+                         dora=(cfg.adapter_type == "dora"))
+            if cfg.adapter_type in ("lora", "dora") else None
         )
         self.members: List[SharedMember] = []
         self._rng = random.Random(cfg.seed)
@@ -250,8 +251,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--pop-capacity", type=int, default=POETConfig.pop_capacity)
     p.add_argument("--agent-d-model", type=int, default=POETConfig.agent_d_model)
     p.add_argument("--agent-recurrent-steps", type=int, default=POETConfig.agent_recurrent_steps)
-    p.add_argument("--adapter-type", type=str, default="lora", choices=["hidden", "lora"],
-                   help="per-environment adapter: 'lora' (deeper, adapts the core) or 'hidden'")
+    p.add_argument("--adapter-type", type=str, default="dora", choices=["hidden", "lora", "dora"],
+                   help="per-environment adapter: 'dora'/'lora' (deeper, adapt the core) or 'hidden'")
     p.add_argument("--adapter-rank", type=int, default=POETConfig.adapter_rank)
     p.add_argument("--lora-rank", type=int, default=POETConfig.lora_rank)
     p.add_argument("--opt-steps", type=int, default=POETConfig.opt_steps)

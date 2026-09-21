@@ -43,15 +43,20 @@ def test_adapter_specialises_after_training():
     assert float(tr.members[0].adapter.up.weight.detach().abs().sum()) > 0  # learned a specialisation
 
 
-def test_lora_adapter_is_identity_at_init_and_active_after_training():
+import pytest
+
+
+@pytest.mark.parametrize("adapter_type", ["lora", "dora"])
+def test_deep_adapter_is_identity_at_init_and_active_after_training(adapter_type):
     torch.manual_seed(0)
     tok = ArithmeticTokenizer()
     from lamb.data import collate
     from lamb.selfplay.grammar import TaskGrammar
 
     tr = SharedBackbonePOETTrainer(
-        _cfg(adapter_type="lora", lora_rank=4, init_members=1, pop_capacity=4,
+        _cfg(adapter_type=adapter_type, lora_rank=4, init_members=1, pop_capacity=4,
              reproduce_every=100, behavioural_novelty=False), tok)
+    assert tr.injector.dora == (adapter_type == "dora")
     assert tr.injector is not None and len(tr.injector.shapes) > 0   # LoRA injected into core linears
 
     g = TaskGrammar()
@@ -68,7 +73,7 @@ def test_lora_adapter_is_identity_at_init_and_active_after_training():
             tr.injector.set_active(None)
 
     base = logits(None)
-    assert torch.allclose(base, logits(tr.members[0].adapter))   # B=0 => identity at init
+    assert torch.allclose(base, logits(tr.members[0].adapter), atol=1e-5)  # B=0 (and m=||W||) => identity
     for _ in range(6):
         tr.iterate()
-    assert not torch.allclose(logits(None), logits(tr.members[0].adapter))  # trained LoRA changes logits
+    assert not torch.allclose(logits(None), logits(tr.members[0].adapter))  # trained adapter changes logits
