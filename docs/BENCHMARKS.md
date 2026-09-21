@@ -27,6 +27,23 @@ reversed vs. forward digits and Abacus on/off to attribute the gains.
 
 - **Test-time scaling curve** — accuracy vs. latent step budget `T` at fixed
   weights (`lamb.eval.test_time_scaling`). A well-trained LAMb is monotone in `T`.
+  This is *vertical* latent compute (deepen fixed positions).
+- **Continuous-thought scaling (Coconut, shipped)** — `python -m lamb.coconut`
+  (`lamb/coconut.py`) inserts `K` continuous-thought scratchpad positions between
+  prompt and answer (*horizontal* latent compute) and reports two curves on
+  depth-2 nested expressions:
+  - **Accuracy vs. #thoughts** — greedy exact-match rises `K=0: 0.39 → K=3: 0.52`
+    on a ~0.28M-param CPU model, and the latent-collapse diagnostic (mean pairwise
+    cosine of the thought vectors, the arXiv:2510.12167 homogeneity signal) falls
+    cos `0.88 → 0.27` as thoughts specialise. Coconut's language-domain
+    `w/o curriculum` ablation underperforms no-thoughts; the number-native
+    substrate makes the scratchpad useful here without a language curriculum.
+  - **Verifier-selected best-of-N** — dropout-diverse latent trajectories selected
+    by the exact verifier turn arXiv:2510.12167's monotone-but-unusable Pass@N
+    into *realised* accuracy `N=1: 0.52 → N=8: 0.66` (their trained reward models
+    could not select; LAMb's verifier can). A test-time self-improvement loop.
+  Covered by `tests/test_coconut.py` (incl. the `K=0` reduction to ordinary
+  teacher forcing).
 - **ProntoQA / ProsQA** — the synthetic logical-reasoning sets Coconut used to
   show latent breadth-first reasoning beats token chain-of-thought. These need a
   task encoder but no general NL, so they fit LAMb's paradigm.

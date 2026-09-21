@@ -105,14 +105,47 @@ Refs: Digital Red Queen ([2601.03335](https://arxiv.org/abs/2601.03335));
 PopuLoRA ([2605.16727](https://arxiv.org/pdf/2605.16727)); learnable information
 gain ([2603.02218](https://arxiv.org/pdf/2603.02218)).
 
-## 3. Continuous-thought decoding (full Coconut)
+## 3. Continuous-thought decoding (Coconut) — Stage A implemented
 
-The core already reasons in latent space via recurrent depth. Add the Coconut
-inference mode: feed the last hidden state back as the next *input* embedding for
-several "thought" steps between emitted tokens, enabling breadth-first latent
-search on backtracking-heavy problems.
+Implemented in `lamb/coconut.py` (`python -m lamb.coconut`) and the Coconut path
+on `LAMb` (`_roll_thoughts` / `coconut_logits` / `coconut_solve`). Where the
+recurrent core thinks *vertically* (iterate a block at fixed positions), Coconut
+adds *horizontal* latent thinking: insert `K` scratchpad positions between the
+prompt and the answer whose input embedding is the model's own last hidden state,
+fed straight back in continuous space (via `thought_norm` + a learned
+`thought_marker`) and never decoded. Those thoughts join the attention context —
+a working memory the answer reads. `K=0` reduces *exactly* to ordinary
+answer-only teacher forcing (a regression test asserts it; RoPE is relative so the
+left-padded prompt is unaffected).
 
-Ref: Coconut ([2412.06769](https://arxiv.org/abs/2412.06769)).
+Key result, and a departure from the literature. Coconut's published gains need a
+curriculum that distils the thoughts from **language** CoT steps; its own
+`w/o curriculum` ablation — our exact setting (feed the state back, supervise only
+the answer) — underperforms even no-thoughts *in the language domain*, and
+arXiv:2510.12167 traces that to geometrically homogeneous latents plus no reliable
+way to **select** a good trajectory. Here, with a number-native substrate and
+genuinely multi-step tasks, plain answer-NLL through a randomly sized thought
+chain **does** make the scratchpad useful: on depth-2 nested expressions greedy
+exact-match rises `K=0: 0.39 → K=3: 0.52` (a tiny 0.28M-param CPU model), and the
+latent-collapse diagnostic (`collapse_metric`, the 2510.12167 homogeneity signal)
+falls from cos≈0.88 to cos≈0.27 as the thoughts specialise.
+
+The verifier is LAMb's asset the 2510.12167 line lacked. Perturbing the latent
+phase with dropout draws diverse trajectories and the exact verifier **selects**
+the winner (best-of-N), turning their monotone-but-unusable Pass@N into *realised*
+accuracy: `N=1: 0.52 → N=8: 0.66` — a test-time self-improvement loop (search the
+latent space, verify, keep the winner) that needs no labels at deploy. Hard
+STaR-filtering to the verifier-solved subset was tried and **rejected**: on a tiny
+model it starves the gradient and collapses the thoughts to a constant, and since
+the grammar already supplies exact labels, teacher forcing already carries the
+verifier's information — so the verifier's unique leverage is at inference.
+
+Stage B (next): latent **inter-agent** communication — the message passed between
+agents *is* a Coconut thought vector (receiving = thinking another agent's
+thought), reusing this exact continuous-input path.
+
+Refs: Coconut ([2412.06769](https://arxiv.org/abs/2412.06769)); inference-time
+scaling for continuous-space reasoning ([2510.12167](https://arxiv.org/abs/2510.12167)).
 
 ## 4. Deeper test-time memory (ATLAS)
 

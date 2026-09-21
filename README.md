@@ -7,7 +7,7 @@ system:
 
 | Design goal | Mechanism in LAMb | Grounding |
 | --- | --- | --- |
-| **Reason in latent space** | A depth-recurrent core iterates a shared block `T` times, feeding the hidden state back as its own next input. All reasoning happens in continuous space; no intermediate tokens are decoded, and `T` is a knob you turn up at inference. | Coconut (continuous thought, [2412.06769](https://arxiv.org/abs/2412.06769)); recurrent-depth latent reasoning; *Survey on Latent Reasoning* ([2507.06203](https://arxiv.org/html/2507.06203)) |
+| **Reason in latent space** | A depth-recurrent core iterates a shared block `T` times (*vertical* latent thinking), feeding the hidden state back as its own next input. A **Coconut** scratchpad (`lamb/coconut.py`, Stage A) adds *horizontal* latent thinking: `K` continuous-thought positions between prompt and answer, each fed the model's own last hidden state. All reasoning is continuous; no intermediate tokens are decoded, and both `T` and `K` are knobs you turn up at inference. | Coconut (continuous thought, [2412.06769](https://arxiv.org/abs/2412.06769)); inference-time scaling for continuous reasoning ([2510.12167](https://arxiv.org/abs/2510.12167)); *Survey on Latent Reasoning* ([2507.06203](https://arxiv.org/html/2507.06203)) |
 | **Communicate in pure arithmetic** | No BPE. Numbers are digit tokens with **Abacus** intra-number positions (reset per number, LSB-first) plus a **value channel** so a digit also knows its number's magnitude. | Abacus embeddings; *Numbers Already Carry Their Own Embeddings* ([2606.14108](https://arxiv.org/html/2606.14108v1)); BitTokens |
 | **infContext** | A fixed-size **test-time neural memory** written during the forward pass by a surprise-gated delta rule (data-dependent forget/write gates). O(1) state, unbounded effective context. | Titans ([NeurIPS 2025](https://proceedings.neurips.cc/paper_files/paper/2025/file/a4ca07aa108036f80cbb5b82285fd4b1-Paper-Conference.pdf)); ATLAS ([2505.23735](https://arxiv.org/abs/2505.23735)); DeltaNet |
 | **Exploding self-improvement** | **Self-play**: a learning-progress bandit proposes tasks at the solver's frontier, an exact **Rust verifier** gives the reward, and the solver improves by expert iteration. Zero human data; the mastered difficulty frontier expands on its own. | Absolute Zero ([2505.03335](https://arxiv.org/pdf/2505.03335)); R-Zero; automatic curriculum learning |
@@ -51,6 +51,7 @@ python -m lamb.poet                          # POET population of (env, agent) p
 python -m lamb.poet_shared                    # shared-backbone POET (DoRA adapters by default; --adapter-type lora|hidden)
 python -m lamb.memory_bench                   # long-context needle/passkey retrieval (infContext)
 python -m lamb.ruler_bench                     # RULER/BABILong-style suite (NIAH, multi-key, variable tracking)
+python -m lamb.coconut                         # Coconut continuous-thought reasoning + verifier best-of-N (Stage A)
 ```
 
 You will watch, from zero data:
@@ -86,6 +87,7 @@ lamb/                     Python package (torch)
     verifier.py           exact reward oracle (wraps the Rust kernels)
     loop.py               Absolute-Zero-style self-play trainer
   eval.py                 held-out accuracy, length generalization, test-time scaling
+  coconut.py              Coconut continuous-thought reasoning + verifier-selected best-of-N (Stage A)
   train.py                CPU-first end-to-end entry point (single-agent self-play)
   poet.py                 POET population of (environment, agent) pairs (Step 3)
   poet_shared.py          shared-backbone POET: one backbone + per-environment adapters

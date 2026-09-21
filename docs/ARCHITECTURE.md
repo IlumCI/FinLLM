@@ -242,6 +242,67 @@ identity at initialisation. At equal budget the best specialist reaches ~0.77
 (DoRA) vs ~0.53 (LoRA) vs ~0.50 (final-hidden) -- DoRA wins for one magnitude
 vector per layer on top of LoRA. `--adapter-type {dora,lora,hidden}`.
 
+## 10. Coconut continuous-thought reasoning (Stage A, `lamb/coconut.py`)
+
+The recurrent core (§2) thinks *vertically* — iterate a block `S` times at fixed
+positions. Coconut adds *horizontal* latent thinking: insert `K` scratchpad
+positions between the prompt and the answer whose input embedding is the model's
+own last hidden state, fed back in continuous space and never decoded. They enter
+the attention context, so the answer can attend to them as a working memory.
+
+Mechanism (methods on `LAMb`):
+
+```
+x = embed([BOS] expr =)                       # left-padded prompt embeddings
+repeat K times:                               # _roll_thoughts
+    h = core(x)                               # residual stream
+    t = thought_norm(h[:, -1]) + thought_marker   # bounded feedback + latent tag
+    x = concat(x, t)                          # append a latent position (no token)
+logits = readout(core(concat(x, answer)))     # coconut_logits: BPTT through thoughts
+```
+
+- **Feedback hygiene.** `thought_norm` (an RMSNorm) maps a residual-stream hidden
+  state into input-embedding statistics, so the fed-back state has bounded
+  magnitude — the one stability trick the Coconut paper relies on (they reuse the
+  final norm). `thought_marker` is a learned additive tag (zero-init, so the
+  interface is inert at start) letting the model tell a thought from a token — a
+  latent analogue of Coconut's `<bot>/<eot>` boundaries. The thought is the
+  **pre-readout** residual stream: `norm_f`+`lm_head` is the verbalisation head,
+  which the thought deliberately bypasses (nothing is decoded to a token).
+- **`K=0` is exactly ordinary teacher forcing.** RoPE is relative, so left-padding
+  the prompt does not change any real-position output; `tests/test_coconut.py`
+  asserts the answer cross-entropy matches `LAMb.forward` to `1e-5`.
+- **Test-time budget.** `K` is chosen at call time; training randomises
+  `K ∈ [train_min_thoughts, train_max_thoughts]` (the §2 recurrent-depth recipe,
+  applied to thoughts), so greedy accuracy rises as more thoughts are spent.
+- **Cost.** `K` sequential core forwards to build the thoughts, plus one for the
+  answer (`n+1` forward passes); gradients flow back through the whole chain.
+
+Training is plain next-token cross-entropy on the answer, back-propagated through
+the thought chain. Coconut's gains normally need a curriculum distilling the
+thoughts from **language** CoT; LAMb has none, and Coconut's own `w/o curriculum`
+ablation is exactly this setting (language-domain: underperforms no-thoughts,
+diagnosed by arXiv:2510.12167 as homogeneous latents). Measured here on the tiny
+CPU model (depth-2 nested expressions, ~0.28M params): the scratchpad becomes
+useful anyway — greedy exact-match `K=0: 0.39 → K=3: 0.52` — because the substrate
+is number-native and the tasks are genuinely multi-step. `collapse_metric` (mean
+pairwise cosine of the thought vectors, the 2510.12167 homogeneity signal) falls
+cos `0.88 → 0.27` as thoughts specialise. Hard STaR-filtering to the
+verifier-solved subset was tried and rejected (it starves the tiny model and
+collapses the thoughts; exact labels already carry the verifier's information at
+train time).
+
+**Verifier-selected best-of-N (test-time self-improvement).** arXiv:2510.12167
+showed dropout-diverse latent trajectories raise Pass@N monotonically but could
+not *select* the winner (trained reward models barely beat chance). LAMb's exact
+verifier is that missing selector: perturb the latent phase with dropout, decode
+each trajectory greedily (dropout off during answer emission — perturb the
+thoughts, not the tokens), keep any the verifier accepts. Realised accuracy
+`N=1: 0.52 → N=8: 0.66` — searching the latent space and verifying, needing no
+labels at deploy. Nothing is verbalised; the verifier checks only the emitted
+number, so the thoughts stay a blackbox. Stage B reuses this continuous-input path
+for latent inter-agent messages (a message *is* a thought vector).
+
 ## Defaults
 
 Tiny CPU-first model: `d_model=128`, 1 prelude / 1 recurrent / 1 coda block,

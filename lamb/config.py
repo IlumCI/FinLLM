@@ -136,6 +136,71 @@ class TrainConfig:
 
 
 @dataclass
+class CoconutConfig:
+    """Stage A: Coconut single-agent continuous-thought reasoning.
+
+    A "thought" is a latent scratchpad position inserted between the prompt and
+    the answer whose input embedding is the model's own last hidden state -- pure
+    latent, never decoded. Coconut's published gains come from a curriculum that
+    distils the thoughts from *language* chain-of-thought steps; LAMb has no
+    language traces (only a verifiable final answer). The training signal is
+    therefore plain answer-NLL back-propagated through the thought chain, with the
+    thought count randomised so accuracy is robust to -- and scales with -- the
+    test-time budget. Because the task is genuinely multi-step and the substrate
+    is number-native, the scratchpad becomes useful without a language curriculum
+    (in contrast to Coconut's language-domain ``w/o curriculum`` ablation).
+
+    LAMb's asset the Coconut / arXiv:2510.12167 line lacked is an **exact
+    verifier**. That paper showed sampling dropout-diverse latent trajectories
+    raises Pass@N monotonically but could not *select* the right one (its trained
+    reward models barely beat chance). LAMb selects with the verifier, so Pass@N
+    becomes realised accuracy -- a test-time self-improvement loop (search the
+    latent space, verify, keep the winner) that needs no labels at deploy time.
+    The verifier only checks the emitted number; the thoughts stay a blackbox.
+    """
+
+    steps: int = 1000
+    batch_size: int = 64
+    lr: float = 2e-3
+    weight_decay: float = 0.01
+    warmup: int = 50
+    grad_clip: float = 1.0
+    seed: int = 0
+    device: str = "cpu"
+
+    # Task space: nested-expression grammar (multi-step is where a latent
+    # scratchpad can help). Depth 2 = ``(a op b) op (c op d)``.
+    depth: int = 2
+    digits: int = 1
+    ops_key: int = 0             # 0 -> (+,-); 1 -> (+,-,*)
+
+    # Latent thought budget. Randomising it over training makes accuracy robust
+    # to the test-time budget (the recurrent-depth recipe, applied to thoughts),
+    # which is what lets accuracy scale with more thoughts at inference.
+    n_thoughts: int = 3
+    sample_train_thoughts: bool = True
+    train_min_thoughts: int = 0
+    train_max_thoughts: int = 4
+
+    # Test-time verifier-selected best-of-N: perturb the latent phase with dropout
+    # to draw diverse trajectories, decode each greedily, keep any the verifier
+    # accepts. ``thought_dropout`` is the diversity source (0 => deterministic).
+    thought_dropout: float = 0.2
+
+    # Evaluation.
+    eval_every: int = 150
+    eval_tasks: int = 256
+    eval_thoughts: Tuple[int, ...] = (0, 1, 2, 3, 4)  # K sweep: accuracy vs #thoughts
+    eval_bestof: Tuple[int, ...] = (1, 2, 4, 8)       # N sweep: Pass@N via the verifier
+    log_every: int = 50
+    ckpt_dir: str = "runs"
+
+    def max_answer_len(self) -> int:
+        # Generous bound on answer token length across the reachable space.
+        return min(24, 2 + self.digits * (2 ** min(self.depth, 3)))
+
+
+@dataclass
 class POETConfig:
     """Red Queen Step 3: a POET-style population of (environment, agent) pairs.
 
