@@ -104,6 +104,14 @@ class TrainConfig:
     buffer_capacity: int = 20000
     expert_fraction: float = 0.25  # share of each batch drawn from solved-trace replay
 
+    # Red Queen coevolution (Step 1): a solver league (historical self-play) plus
+    # a novelty/diversity term on task selection, with relative-fitness metrics.
+    red_queen: bool = False
+    league_capacity: int = 4
+    league_snapshot_every: int = 200  # steps between frozen solver snapshots
+    novelty_coef: float = 0.5         # diversity-maintenance weight on task selection
+    novelty_decay: float = 0.98       # EMA decay for per-cell visitation
+
     eval_every: int = 100
     eval_batch: int = 256
     log_every: int = 50

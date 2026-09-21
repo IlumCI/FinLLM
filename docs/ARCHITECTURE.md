@@ -135,6 +135,32 @@ target) with the `eps` floor preserving coverage; its advantage over the tabular
 bandit is generalization across large/continuous task spaces, where a per-cell
 table does not fit. The bandit remains the recommended default.
 
+## 7. Red Queen coevolution (open-endedness, Step 1)
+
+Enabled with `red_queen=True`. The reactive autocurriculum (a fixed function of
+solver competence) saturates once a bounded task space is mastered. Red Queen
+dynamics make improvement *relative*: the solver must keep dominating its own
+past on an ever-advancing frontier. Step 1 adds the minimal, measurable machinery
+(`lamb/selfplay/league.py`):
+
+* **Solver league** -- periodic frozen snapshots of the solver (historical
+  self-play; keeps the oldest baseline plus the most recent). Cheap for a tiny
+  model.
+* **Novelty / diversity term** -- per-cell EMA visitation drives a count-based
+  novelty bonus that up-weights rarely-proposed cells, both at sampling time and
+  in the (learned) proposer's reward. This is the "diversity maintenance"
+  ingredient Digital Red Queen (arXiv:2601.03335) pairs with historical
+  self-play.
+* **Relative-fitness metrics** -- `dominance` (current minus best-past accuracy on
+  the *current* frontier; > 0 means the solver is still pulling ahead where the
+  proposer now pushes) and `forgetting` (oldest-snapshot minus current accuracy on
+  a fixed easy set; > 0 means regression). On a bounded grid `dominance` decays to
+  0 as the space saturates -- the signal that an open-ended task space is needed.
+
+Roadmap Steps 2-3 (a generative task grammar with minimal-criterion admission,
+then a full POET-style population of (task, solver) pairs with transfer) build on
+this; see `docs/ROADMAP.md`.
+
 ## Defaults
 
 Tiny CPU-first model: `d_model=128`, 1 prelude / 1 recurrent / 1 coda block,

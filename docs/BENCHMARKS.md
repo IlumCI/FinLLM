@@ -44,6 +44,10 @@ reversed vs. forward digits and Abacus on/off to attribute the gains.
 
 - **Frontier-expansion curve** — mastered operand-digit sum vs. training step
   (the trainer already logs `frontier`).
+- **Relative fitness (Red Queen)** — with `--red-queen`, `dominance` (current vs.
+  best-past accuracy on the current frontier) and `forgetting` (regression on a
+  fixed easy set). Positive, sustained `dominance` is the signature of genuine
+  coevolution; its decay to 0 flags saturation of a bounded task space.
 - **Sample efficiency** — accuracy vs. number of self-generated problems.
 - **OOD transfer** — evaluate on operations / widths the proposer never
   emphasized, to test whether self-play generalizes beyond its own curriculum.

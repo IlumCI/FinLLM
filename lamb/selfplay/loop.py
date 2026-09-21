@@ -36,6 +36,7 @@ from ..model.lamb import LAMb
 from ..tokenizer import ArithmeticTokenizer
 from . import grpo as grpo_utils
 from .hyperproposer import GRPOHyperProposer
+from .league import League
 from .proposer import BanditProposer, BaseProposer, learnability
 from .verifier import Verifier
 
@@ -85,6 +86,10 @@ class SelfPlayTrainer:
             for p in self.ref_model.parameters():
                 p.requires_grad_(False)
 
+        # Red Queen: historical-self-play league + per-cell visitation for novelty.
+        self.league: Optional[League] = League(cfg.league_capacity) if cfg.red_queen else None
+        self.visit_ema = np.zeros(len(self.grid), dtype=np.float64)
+
         self.buffer: deque = deque(maxlen=cfg.buffer_capacity)
         self.success_ema: Dict[int, float] = {i: 0.0 for i in range(len(self.grid))}
         self._rng = random.Random(cfg.seed)
@@ -126,10 +131,22 @@ class SelfPlayTrainer:
         """The per-cell solver-competence state (smoothed success), the proposer input."""
         return np.array([self.success_ema[i] for i in range(len(self.grid))], dtype=np.float64)
 
+    def _novelty(self) -> np.ndarray:
+        """Count-based novelty from EMA visitation (higher = less recently proposed)."""
+        nov = 1.0 / np.sqrt(1e-3 + self.visit_ema)
+        return nov / (nov.max() + 1e-9)  # normalized to (0, 1]
+
     def _sample_cells(self, n: int, state: np.ndarray) -> List[int]:
         if self.step < self.cfg.proposer_warmup:
             return [self._rng.randrange(len(self.grid)) for _ in range(n)]
-        return self.proposer.sample(n, state)
+        p = self.proposer.probs(state)
+        # Diversity maintenance: up-weight rarely-visited cells so the arms race
+        # keeps exploring the frontier instead of collapsing onto one region.
+        if self.cfg.red_queen and self.cfg.novelty_coef > 0 and len(self.grid) > 1:
+            nov = self._novelty() - self._novelty().mean()
+            p = p * np.exp(self.cfg.novelty_coef * nov)
+            p = p / p.sum()
+        return self._rng.choices(range(len(self.grid)), weights=p.tolist(), k=n)
 
     def _mastered_frontier(self) -> int:
         frontier = 0
@@ -165,6 +182,10 @@ class SelfPlayTrainer:
             problems.append(expr)
             answers.append(ans)
 
+        # Track per-cell visitation (EMA) for the novelty / diversity term.
+        counts = np.bincount(cells, minlength=len(self.grid)).astype(np.float64) / max(1, len(cells))
+        self.visit_ema = cfg.novelty_decay * self.visit_ema + (1.0 - cfg.novelty_decay) * counts
+
         examples = [self.tok.encode(p, a) for p, a in zip(problems, answers)]
         # Expert-iteration replay: mix in previously solved traces.
         n_replay = int(len(examples) * cfg.expert_fraction)
@@ -199,6 +220,10 @@ class SelfPlayTrainer:
         if self.ref_model is not None and (self.step + 1) % cfg.grpo_ref_update_every == 0:
             self.ref_model.load_state_dict(self.model.state_dict())
 
+        # Historical self-play: periodically freeze the solver into the league.
+        if self.league is not None:
+            self.league.maybe_snapshot(self.model, self.step + 1, cfg.league_snapshot_every)
+
         # Roll out on the freshly proposed problems for the reward signal.
         preds = self.model.solve(
             problems, self.tok, max_answer_len=self._answer_len, device=cfg.device
@@ -212,11 +237,17 @@ class SelfPlayTrainer:
         self._update_success_ema(cells, correct)
 
         # Co-evolve the proposer: reward each proposed cell by its (updated)
-        # learnability; the bandit ignores this, the hypernetwork learns from it.
+        # learnability, plus a novelty bonus under Red Queen. The bandit ignores
+        # this; the hypernetwork learns from it.
         if self.step >= cfg.proposer_warmup:
-            rewards = learnability(self._state())
-            prop_metrics = self.proposer.update(state, cells, [rewards[c] for c in cells])
+            reward_vec = learnability(self._state())
+            if cfg.red_queen and cfg.novelty_coef > 0:
+                reward_vec = reward_vec + cfg.novelty_coef * self._novelty()
+            prop_metrics = self.proposer.update(state, cells, [reward_vec[c] for c in cells])
             extra.update(prop_metrics)
+
+        if self.league is not None:
+            extra["league_size"] = float(len(self.league))
 
         self.step += 1
         post = self._state()
@@ -233,6 +264,30 @@ class SelfPlayTrainer:
             extra=extra,
         )
         return stats
+
+    def red_queen_report(self, n: int = 64) -> Optional[Dict[str, float]]:
+        """Relative-fitness snapshot: current solver vs. its league on the current
+        frontier (dominance) and on a fixed easy set (forgetting). ``None`` until
+        the league has a snapshot."""
+        if self.league is None or len(self.league) == 0:
+            return None
+        state = self._state()
+        p = self.proposer.probs(state)
+        frontier_cells = self._rng.choices(range(len(self.grid)), weights=p.tolist(), k=n)
+        frontier = [self._instance(c) for c in frontier_cells]
+
+        easy = [i for i, (_, a, b) in enumerate(self.grid)
+                if a == self.cfg.start_digits and b == self.cfg.start_digits] or list(range(len(self.grid)))
+        retention = [self._instance(self._rng.choice(easy)) for _ in range(n)]
+
+        return self.league.relative_fitness(
+            self.model, self.tok, frontier, retention, device=self.cfg.device,
+            max_answer_len=self._answer_len,
+        )
+
+    def _instance(self, cell_idx: int) -> Tuple[str, str]:
+        op, a, b = self.grid[cell_idx]
+        return self.verifier.sample(op, a, b, self._next_seed())
 
     def _update_success_ema(self, cells: List[int], correct: List[bool]) -> None:
         per_cell: Dict[int, List[float]] = defaultdict(list)

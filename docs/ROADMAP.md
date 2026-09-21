@@ -46,6 +46,31 @@ eval ships in `lamb.eval.length_generalization`; add long-context recall
 adapter. General-LLM suites (MMLU) are out of scope until a language front-end
 exists.
 
+## 2c. Red Queen coevolution (open-endedness) — the active direction
+
+The reactive autocurriculum saturates on a bounded task space (learnability -> 0
+once everything is mastered). Unbounded self-improvement needs *relative* fitness:
+the solver must keep dominating its own past on an ever-advancing frontier.
+
+- **Step 1 (implemented, `red_queen=True`).** Solver league (historical
+  self-play), a novelty/diversity term on task selection, and relative-fitness
+  metrics (`dominance`, `forgetting`) in `lamb/selfplay/league.py`. On the bounded
+  grid, `dominance` starts positive and decays to 0 as the space saturates — the
+  measured signal that motivates Step 2.
+- **Step 2 (next).** Replace the fixed grid with a **generative task grammar**
+  (nested expressions, growing depth/ops) so the space is genuinely open-ended;
+  the hypernetwork proposer generates *in* it, with **minimal-criterion
+  admission** gated by the exact verifier (a task is admitted only if it is novel
+  and just-barely solvable). This subsumes item 5 below. Refs: POET
+  ([1901.01753](https://arxiv.org/abs/1901.01753)); Minimal Criterion Coevolution
+  (Brant & Stanley).
+- **Step 3.** Full **POET-style population** of (task, solver) pairs with transfer
+  between them, and evaluation by relative fitness / frontier-advancement rate.
+
+Refs: Digital Red Queen ([2601.03335](https://arxiv.org/abs/2601.03335));
+PopuLoRA ([2605.16727](https://arxiv.org/pdf/2605.16727)); learnable information
+gain ([2603.02218](https://arxiv.org/pdf/2603.02218)).
+
 ## 3. Continuous-thought decoding (full Coconut)
 
 The core already reasons in latent space via recurrent depth. Add the Coconut

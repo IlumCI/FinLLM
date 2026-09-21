@@ -45,6 +45,7 @@ python -m lamb.train --steps 4000 --recurrent-steps 6   # pushes the frontier fu
 python -m lamb.train --use-memory        # enable the test-time memory in the core
 python -m lamb.train --proposer grpo_hyper   # GRPO-trained hypernetwork proposer
 python -m lamb.train --solver grpo           # add a GRPO/RLVR term on the solver
+python -m lamb.train --red-queen             # Red Queen coevolution (league + novelty + relative fitness)
 ```
 
 You will watch, from zero data:
@@ -72,6 +73,7 @@ lamb/                     Python package (torch)
     proposer.py           learning-progress bandit (default; pluggable interface)
     hyperproposer.py      GRPO-trained hypernetwork proposer, bandit-anchored
     grpo.py               GRPO utilities + solver RLVR objective (DAPO/Dr.GRPO options)
+    league.py             Red Queen: solver league + relative-fitness metrics
     verifier.py           exact reward oracle (wraps the Rust kernels)
     loop.py               Absolute-Zero-style self-play trainer
   eval.py                 held-out accuracy, length generalization, test-time scaling
@@ -110,6 +112,13 @@ The proposer is a pluggable interface (`lamb.selfplay.proposer.BaseProposer`):
 Solver: **expert iteration** (default; teacher forcing on verified traces) or a
 **GRPO/RLVR** term (`--solver grpo`, added on top after a warm start, with DAPO
 dynamic sampling and an optional Dr.GRPO no-std normalization).
+
+**Red Queen coevolution** (`--red-queen`, roadmap Step 1): a solver **league**
+(historical self-play), a **novelty** term (diversity maintenance), and
+relative-fitness metrics — `dominance` (does the solver keep beating its past on
+the current frontier?) and `forgetting`. On the bounded demo grid `dominance`
+decays to 0 as the space saturates, which is the measured motivation for an
+open-ended task grammar (Step 2). Grounded in Digital Red Queen and POET/MCC.
 
 ## Benchmarks
 

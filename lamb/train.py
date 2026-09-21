@@ -38,6 +38,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
                    choices=["bandit", "grpo_hyper"], help="task proposer")
     p.add_argument("--solver", type=str, default=TrainConfig.solver_algo,
                    choices=["expert", "grpo"], help="solver optimisation (expert iteration or +GRPO)")
+    p.add_argument("--red-queen", action="store_true",
+                   help="enable Red Queen coevolution (solver league + novelty + relative fitness)")
+    p.add_argument("--league-snapshot-every", type=int, default=TrainConfig.league_snapshot_every,
+                   help="steps between frozen solver snapshots (Red Queen)")
+    p.add_argument("--novelty-coef", type=float, default=TrainConfig.novelty_coef,
+                   help="diversity-maintenance weight on task selection (Red Queen)")
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--device", type=str, default="cpu")
     p.add_argument("--eval-every", type=int, default=TrainConfig.eval_every)
@@ -65,6 +71,9 @@ def main(argv=None) -> None:
         ckpt_dir=args.ckpt_dir,
         proposer_kind=args.proposer,
         solver_algo=args.solver,
+        red_queen=args.red_queen,
+        league_snapshot_every=args.league_snapshot_every,
+        novelty_coef=args.novelty_coef,
     )
     model_cfg = ModelConfig(
         d_model=args.d_model,
@@ -80,7 +89,7 @@ def main(argv=None) -> None:
     print(f"model params: {model.num_params():,} | difficulty cells: {len(trainer.grid)}")
     print(f"ops={ops} max_digits={args.max_digits} recurrent_steps={args.recurrent_steps} "
           f"use_memory={args.use_memory} device={args.device}")
-    print(f"proposer={args.proposer} solver={args.solver}")
+    print(f"proposer={args.proposer} solver={args.solver} red_queen={args.red_queen}")
     print("-" * 88)
 
     eval_budget = 2 * args.max_digits + 2
@@ -106,6 +115,11 @@ def main(argv=None) -> None:
                            max_answer_len=eval_budget)
             best = max(best, float(res["overall"]))
             print(f"    [eval] overall exact-match acc: {res['overall']:.3f}  (best {best:.3f})")
+            rq = trainer.red_queen_report()
+            if rq is not None:
+                print(f"    [red-queen] dominance {rq['dominance']:+.2f} "
+                      f"(cur {rq['current_frontier']:.2f} vs league {rq['league_best_frontier']:.2f}) "
+                      f"| forgetting {rq['forgetting']:.2f} | league {int(rq['league_size'])}")
 
     dur = time.time() - start
     print("-" * 88)
