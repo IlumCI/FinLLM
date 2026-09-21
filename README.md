@@ -1,0 +1,102 @@
+# LAMb — Latent Arithmetic Machine
+
+LAMb is a **number-native, depth-recurrent, latent-reasoning autoregressive
+model** that teaches itself arithmetic from zero external data. It is a research
+scaffold that combines four current frontier lines into one small, CPU-runnable
+system:
+
+| Design goal | Mechanism in LAMb | Grounding |
+| --- | --- | --- |
+| **Reason in latent space** | A depth-recurrent core iterates a shared block `T` times, feeding the hidden state back as its own next input. All reasoning happens in continuous space; no intermediate tokens are decoded, and `T` is a knob you turn up at inference. | Coconut (continuous thought, [2412.06769](https://arxiv.org/abs/2412.06769)); recurrent-depth latent reasoning; *Survey on Latent Reasoning* ([2507.06203](https://arxiv.org/html/2507.06203)) |
+| **Communicate in pure arithmetic** | No BPE. Numbers are digit tokens with **Abacus** intra-number positions (reset per number, LSB-first) plus a **value channel** so a digit also knows its number's magnitude. | Abacus embeddings; *Numbers Already Carry Their Own Embeddings* ([2606.14108](https://arxiv.org/html/2606.14108v1)); BitTokens |
+| **infContext** | A fixed-size **test-time neural memory** written during the forward pass by a surprise-gated delta rule (data-dependent forget/write gates). O(1) state, unbounded effective context. | Titans ([NeurIPS 2025](https://proceedings.neurips.cc/paper_files/paper/2025/file/a4ca07aa108036f80cbb5b82285fd4b1-Paper-Conference.pdf)); ATLAS ([2505.23735](https://arxiv.org/abs/2505.23735)); DeltaNet |
+| **Exploding self-improvement** | **Self-play**: a learning-progress bandit proposes tasks at the solver's frontier, an exact **Rust verifier** gives the reward, and the solver improves by expert iteration. Zero human data; the mastered difficulty frontier expands on its own. | Absolute Zero ([2505.03335](https://arxiv.org/pdf/2505.03335)); R-Zero; automatic curriculum learning |
+
+The Python/PyTorch model is paired with a small **Rust extension** (`lamb_core`,
+via PyO3/maturin) that owns the three hottest / correctness-critical paths — the
+exact arithmetic verifier, the curriculum sampler, and a top-k memory store —
+with pure-Python fallbacks so everything runs even if the extension is not built.
+
+> Status: v0.1 research scaffold. The point is a faithful, end-to-end, runnable
+> realization of the architecture on CPU, not a state-of-the-art solver.
+
+## Install
+
+```bash
+# 1. Python deps (CPU-only torch keeps it light)
+python -m pip install numpy
+python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+python -m pip install -e .
+
+# 2. (optional but recommended) build the native kernels
+python -m pip install maturin
+cd rust && maturin build --release && \
+  python -m pip install --force-reinstall target/wheels/lamb_core-*.whl && cd ..
+```
+
+If step 2 is skipped, LAMb transparently uses the Python fallbacks
+(`lamb.backend()` reports `"python"` instead of `"rust"`).
+
+## Run the self-play demo
+
+```bash
+python -m lamb.train                     # ~4 min on 4 CPU cores
+python -m lamb.train --steps 4000 --recurrent-steps 6   # pushes the frontier further
+python -m lamb.train --use-memory        # enable the test-time memory in the core
+```
+
+You will watch, from zero data:
+
+- `frontier` — the mastered operand-digit sum — expand as the solver improves;
+- `H(prop)` — proposer entropy — stay healthy (the bandit never collapses) while
+  `top` cell shifts from easy to hard;
+- held-out exact-match accuracy climb (1-digit is mastered quickly; 2-digit
+  climbs steadily and mastered with more steps/latent-depth);
+- **test-time latent-step scaling**: accuracy is robust as `T` grows, because
+  the latent depth is randomised during training.
+
+## What's here
+
+```
+lamb/                     Python package (torch)
+  tokenizer.py            number-native tokenizer (digits, Abacus, value channel)
+  model/
+    embeddings.py         token + Abacus + value embeddings
+    transformer.py        RMSNorm, RoPE attention, SwiGLU, pre-norm block
+    latent_core.py        depth-recurrent latent reasoning (+ optional ACT halting)
+    memory.py             Titans/ATLAS-style test-time neural memory
+    lamb.py               the LAMb model: forward / loss / batched solve
+  selfplay/
+    proposer.py           learning-progress bandit (pluggable interface)
+    verifier.py           exact reward oracle (wraps the Rust kernels)
+    loop.py               Absolute-Zero-style self-play trainer
+  eval.py                 held-out accuracy + test-time scaling probes
+  train.py                CPU-first end-to-end entry point
+rust/                     lamb_core native kernels (PyO3/maturin)
+  src/arith.rs            exact recursive-descent integer evaluator + verifier
+  src/curriculum.rs       deterministic problem sampler
+  src/store.rs            top-k associative store
+tests/                    pytest suite (native, tokenizer, model, memory, self-play)
+docs/                     ARCHITECTURE.md, ROADMAP.md
+```
+
+## Test
+
+```bash
+python -m pytest -q
+```
+
+The suite includes an **in-context associative-recall** test that binds a fresh
+random key→label mapping every episode: passing it above chance is direct
+evidence the test-time memory works, since the mapping cannot live in the weights.
+
+## Extending
+
+See [`docs/ROADMAP.md`](docs/ROADMAP.md). The proposer is an injectable interface;
+the headline planned upgrade is a **GRPO-trained hypernetwork proposer** that keeps
+the bandit as its stability anchor, plus GRPO/RLVR on the solver so proposer and
+solver co-evolve over a combinatorial task space.
+
+## License
+
+Apache-2.0.

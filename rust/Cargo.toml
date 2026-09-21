@@ -1,0 +1,18 @@
+[package]
+name = "lamb_core"
+version = "0.1.0"
+edition = "2021"
+description = "Native hot-path kernels for LAMb: exact arithmetic verifier, self-play curriculum sampler, and a top-k associative memory store."
+license = "Apache-2.0"
+
+[lib]
+name = "lamb_core"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { version = "0.25", features = ["extension-module", "abi3-py311"] }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1

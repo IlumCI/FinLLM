@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.so
+*.pyd
+.venv/
+venv/
+
+# Rust
+/rust/target/
+**/*.rs.bk
+Cargo.lock
+
+# LAMb run artifacts
+/runs/
+*.pt
+*.ckpt
+
+# OS / editor
+.DS_Store
+*.swp
+.idea/
+.vscode/

@@ -1,0 +1,37 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "lamb"
+version = "0.1.0"
+description = "LAMb -- Latent Arithmetic Machine: a number-native, depth-recurrent latent-reasoning autoregressive model with test-time memory and self-play self-improvement."
+readme = "README.md"
+requires-python = ">=3.11"
+license = "Apache-2.0"
+authors = [{ name = "IlumCI" }]
+keywords = [
+    "latent-reasoning",
+    "autoregressive-transformer",
+    "arithmetic",
+    "test-time-memory",
+    "self-play",
+    "self-improvement",
+]
+dependencies = [
+    "torch>=2.2",
+    "numpy>=1.24",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7.0", "maturin>=1.7"]
+
+[project.scripts]
+lamb-train = "lamb.train:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["lamb"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

@@ -1,0 +1,17 @@
+[build-system]
+requires = ["maturin>=1.7,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "lamb_core"
+version = "0.1.0"
+description = "Native hot-path kernels for LAMb (exact verifier, curriculum sampler, top-k memory store)."
+requires-python = ">=3.11"
+classifiers = [
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: Implementation :: CPython",
+]
+
+[tool.maturin]
+# Pure-Rust extension module; no Python sources live in this subtree.
+module-name = "lamb_core"
