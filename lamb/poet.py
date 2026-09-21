@@ -34,6 +34,7 @@ from .config import ModelConfig, POETConfig
 from .data import collate
 from .model.lamb import LAMb, build_model
 from .selfplay.grammar import Descriptor, TaskGrammar
+from .selfplay.novelty import NoveltyArchive, behaviour_characterization
 from .tokenizer import ArithmeticTokenizer
 
 
@@ -72,10 +73,14 @@ class POETTrainer:
         self._seed_ctr = 1
         self.iter = 0
         self.transfers = 0
+        self.novelty_rejects = 0
         self.best_conquered = 0
         self._answer_len = self.grammar.max_answer_len(cfg.max_depth, cfg.max_digits)
+        self.archive = NoveltyArchive(k=cfg.novelty_k, threshold=cfg.novelty_threshold)
         for g in range(1, cfg.init_members + 1):
-            self._add(Descriptor(1, g, 0), self._new_agent())
+            m = self._add(Descriptor(1, g, 0), self._new_agent())
+            if cfg.behavioural_novelty:
+                self.archive.add(self._bc(m.agent, m.env))
 
     # -- helpers ----------------------------------------------------------
     def _next_seed(self) -> int:
@@ -106,6 +111,13 @@ class POETTrainer:
         preds = agent.solve([p for p, _ in tasks], self.tok, max_answer_len=self._answer_len, device=self.cfg.device)
         ok = sum(1 for (_, a), pr in zip(tasks, preds) if pr is not None and pr == a)
         return ok / max(1, n)
+
+    @torch.no_grad()
+    def _bc(self, agent: LAMb, env: Descriptor):
+        tasks = [self.grammar.sample(env, self._next_seed()) for _ in range(self.cfg.bc_tasks)]
+        solve = lambda probs, t: agent.solve(  # noqa: E731
+            probs, self.tok, max_answer_len=self._answer_len, n_steps=t, device=self.cfg.device)
+        return behaviour_characterization(solve, tasks)
 
     # -- POET operators ---------------------------------------------------
     def _optimize(self) -> None:
@@ -148,9 +160,19 @@ class POETTrainer:
                 seed_agent = self._new_agent()
                 seed_agent.load_state_dict(m.agent.state_dict())
                 # Minimal criterion: not already (near-)solved by the seed agent.
-                if self._score(seed_agent, child) <= self.cfg.mc_high:
-                    opt = torch.optim.AdamW(seed_agent.parameters(), lr=self.cfg.lr, weight_decay=0.01)
-                    births.append(Member(env=child, agent=seed_agent, opt=opt, born=self.iter))
+                if self._score(seed_agent, child) > self.cfg.mc_high:
+                    continue
+                # Behavioural-novelty admission: reject children that behave like an
+                # environment already admitted, even though their descriptor is new.
+                if self.cfg.behavioural_novelty:
+                    bc = self._bc(seed_agent, child)
+                    if not self.archive.is_novel(bc):
+                        self.novelty_rejects += 1
+                        continue
+                    self.archive.add(bc)
+                opt = torch.optim.AdamW(seed_agent.parameters(), lr=self.cfg.lr, weight_decay=0.01)
+                births.append(Member(env=child, agent=seed_agent, opt=opt, born=self.iter))
+                existing = existing | {child}
         self.population.extend(births)
 
     def _graduate(self) -> None:
@@ -223,7 +245,7 @@ def main(argv=None) -> None:
             best = trainer.best_member()
             print(f"iter {trainer.iter:4d} | pop {len(trainer.population):2d} "
                   f"| attempted {trainer.attempted_frontier():2d} | conquered {trainer.conquered_frontier():2d} "
-                  f"| transfers {trainer.transfers:3d} "
+                  f"| transfers {trainer.transfers:3d} | novelty-rejects {trainer.novelty_rejects:3d} "
                   f"| best {best.env.label()}@{best.success:.2f}")
 
     dur = time.time() - start
@@ -233,7 +255,8 @@ def main(argv=None) -> None:
         print(f"    {m.env.label():10s} complexity {complexity(m.env):2d} | success {m.success:.2f} "
               f"| born@{m.born}")
     print(f"attempted frontier {trainer.attempted_frontier()} | peak conquered frontier "
-          f"{trainer.best_conquered} | total transfers {trainer.transfers}")
+          f"{trainer.best_conquered} | transfers {trainer.transfers} "
+          f"| novelty-rejects {trainer.novelty_rejects} | archive {len(trainer.archive)}")
 
 
 if __name__ == "__main__":

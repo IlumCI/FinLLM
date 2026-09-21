@@ -36,6 +36,7 @@ from .data import collate
 from .model.lamb import LAMb, build_model
 from .poet import Descriptor, complexity, neighbours
 from .selfplay.grammar import TaskGrammar
+from .selfplay.novelty import NoveltyArchive, behaviour_characterization
 from .tokenizer import ArithmeticTokenizer
 
 
@@ -78,10 +79,14 @@ class SharedBackbonePOETTrainer:
         self._seed_ctr = 1
         self.iter = 0
         self.transfers = 0
+        self.novelty_rejects = 0
         self.best_conquered = 0
         self._answer_len = self.grammar.max_answer_len(cfg.max_depth, cfg.max_digits)
+        self.archive = NoveltyArchive(k=cfg.novelty_k, threshold=cfg.novelty_threshold)
         for g in range(1, cfg.init_members + 1):
-            self._add(Descriptor(1, g, 0))
+            m = self._add(Descriptor(1, g, 0))
+            if cfg.behavioural_novelty:
+                self.archive.add(self._bc(m.adapter, m.env))
 
     def _next_seed(self) -> int:
         self._seed_ctr += 1
@@ -110,6 +115,14 @@ class SharedBackbonePOETTrainer:
                                     hidden_adapter=adapter)
         ok = sum(1 for (_, a), pr in zip(tasks, preds) if pr is not None and pr == a)
         return ok / max(1, n)
+
+    @torch.no_grad()
+    def _bc(self, adapter: Adapter, env: Descriptor):
+        tasks = [self.grammar.sample(env, self._next_seed()) for _ in range(self.cfg.bc_tasks)]
+        solve = lambda probs, t: self.backbone.solve(  # noqa: E731
+            probs, self.tok, max_answer_len=self._answer_len, n_steps=t,
+            device=self.cfg.device, hidden_adapter=adapter)
+        return behaviour_characterization(solve, tasks)
 
     def _optimize(self) -> None:
         self.backbone.train()
@@ -152,9 +165,17 @@ class SharedBackbonePOETTrainer:
                 if child in existing or child in {b.env for b in births}:
                     continue
                 seed = copy.deepcopy(m.adapter)  # inherit the parent's specialisation
-                if self._score(seed, child) <= self.cfg.mc_high:
-                    opt = torch.optim.AdamW(seed.parameters(), lr=self.cfg.lr * 3, weight_decay=0.0)
-                    births.append(SharedMember(env=child, adapter=seed, opt=opt, born=self.iter))
+                if self._score(seed, child) > self.cfg.mc_high:
+                    continue
+                if self.cfg.behavioural_novelty:
+                    bc = self._bc(seed, child)
+                    if not self.archive.is_novel(bc):
+                        self.novelty_rejects += 1
+                        continue
+                    self.archive.add(bc)
+                opt = torch.optim.AdamW(seed.parameters(), lr=self.cfg.lr * 3, weight_decay=0.0)
+                births.append(SharedMember(env=child, adapter=seed, opt=opt, born=self.iter))
+                existing = existing | {child}
         self.members.extend(births)
 
     def _graduate(self) -> None:

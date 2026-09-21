@@ -172,6 +172,13 @@ class POETConfig:
     mc_high: float = 0.9         # a child not already (near-)solved by its seed agent
     mastery_threshold: float = 0.9
 
+    # Behavioural-novelty admission (novelty search): admit a child only if it is
+    # far, in behaviour space, from environments already admitted.
+    behavioural_novelty: bool = True
+    novelty_threshold: float = 0.15
+    novelty_k: int = 3
+    bc_tasks: int = 16
+
     # Grammar caps (the space is unbounded up to these for the demo).
     max_depth: int = 4
     max_digits: int = 4

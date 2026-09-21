@@ -40,7 +40,8 @@ def test_poet_runs_and_respects_capacity():
 def test_poet_reproduction_spawns_children():
     torch.manual_seed(0)
     tok = ArithmeticTokenizer()
-    cfg = _cfg(init_members=1, pop_capacity=8, mc_high=1.0, reproduce_threshold=0.5)
+    cfg = _cfg(init_members=1, pop_capacity=8, mc_high=1.0, reproduce_threshold=0.5,
+               behavioural_novelty=False)  # isolate descriptor reproduction here
     trainer = POETTrainer(cfg, tok)
     trainer.population[0].success = 1.0  # a competent parent
     before = len(trainer.population)

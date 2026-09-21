@@ -206,6 +206,14 @@ environments spawn harder, novel grammar-neighbour children, each seeded by its
 parent's agent and admitted only if the seed does not already solve it -- the
 minimal criterion); and **graduate** the easiest environments when over capacity.
 
+Reproduction is gated by **behavioural novelty** (`lamb/selfplay/novelty.py`), not
+descriptor dedup: a candidate environment is characterised by its seed agent's
+competence across latent-step budgets, the answer length it demands, and the gain
+from extra thinking (a behaviour-characterisation vector), and admitted only if it
+is far, in behaviour space, from an archive of admitted environments (novelty
+search / diversity maintenance) -- so structurally-new but behaviourally-redundant
+environments are rejected.
+
 This is the capacity-scaling answer to Step 2's finding: rather than one larger
 model, a *population of specialists plus transfer* raises the ceiling. Reported
 metrics are the attempted frontier (hardest environment present), the peak

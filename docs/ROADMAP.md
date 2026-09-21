@@ -85,8 +85,16 @@ the solver must keep dominating its own past on an ever-advancing frontier.
   cross-environment skill for implicit transfer. Measured: it grows, transfers, and
   conquers the base frontier, at lower absolute mastery than independent agents --
   the honest efficiency/capacity tradeoff of a final-layer adapter.
+- **Behavioural-novelty admission (implemented, `lamb/selfplay/novelty.py`).** Both
+  POET variants gate reproduction on *behaviour*, not descriptor dedup: each
+  candidate environment is characterised by its seed agent's competence across
+  latent-step budgets, the answer length it demands, and how much extra thinking
+  helps (a BC vector), and admitted only if it is far, in behaviour space, from an
+  archive of admitted environments (novelty search). Measured: the population still
+  grows and conquers while ~12 behaviourally-redundant candidates are rejected --
+  real diversity maintenance. Refs: novelty search (Lehman & Stanley); POET.
   Remaining: LoRA/deeper adapters (adapt the core, not just the final hidden); GPU
-  scale-up of the agents; behavioural-novelty (not just descriptor-dedup) admission.
+  scale-up of the agents.
 
 Refs: Digital Red Queen ([2601.03335](https://arxiv.org/abs/2601.03335));
 PopuLoRA ([2605.16727](https://arxiv.org/pdf/2605.16727)); learnable information
