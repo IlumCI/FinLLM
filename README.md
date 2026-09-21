@@ -48,6 +48,7 @@ python -m lamb.train --solver grpo           # add a GRPO/RLVR term on the solve
 python -m lamb.train --red-queen             # Red Queen coevolution (league + novelty + relative fitness)
 python -m lamb.train --red-queen --open-ended --proposer factored_hyper   # open-ended grammar (Step 2)
 python -m lamb.poet                          # POET population of (env, agent) pairs (Step 3)
+python -m lamb.memory_bench                   # long-context needle/passkey retrieval (infContext)
 ```
 
 You will watch, from zero data:
@@ -84,6 +85,7 @@ lamb/                     Python package (torch)
   eval.py                 held-out accuracy, length generalization, test-time scaling
   train.py                CPU-first end-to-end entry point (single-agent self-play)
   poet.py                 POET population of (environment, agent) pairs (Step 3)
+  memory_bench.py         long-context needle/passkey retrieval benchmark (infContext)
 rust/                     lamb_core native kernels (PyO3/maturin)
   src/arith.rs            exact recursive-descent integer evaluator + verifier
   src/curriculum.rs       deterministic problem sampler

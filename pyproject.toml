@@ -29,6 +29,7 @@ dev = ["pytest>=7.0", "maturin>=1.7"]
 [project.scripts]
 lamb-train = "lamb.train:main"
 lamb-poet = "lamb.poet:main"
+lamb-memory-bench = "lamb.memory_bench:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["lamb"]

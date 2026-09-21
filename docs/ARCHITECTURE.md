@@ -72,10 +72,19 @@ state size is independent of sequence length, so effective context is unbounded
 and per-token cost is O(1). Gradients flow through the whole recurrence, so the
 projections learn *how* to use the memory.
 
+The gates carry a **long-term-memory inductive bias**: at initialisation
+retention starts high (`alpha ~ 0.95`) and the write rate low, so a binding
+survives across long spans of uninformative tokens until the model learns what to
+write. This is what lets retrieval extrapolate to lengths far beyond training.
+
 Evidence it works: `tests/test_memory.py` trains a memory-only model on
 in-context associative recall with a **fresh random key→label map per episode**;
 it exceeds chance, which is only possible by writing/reading the bindings at test
-time.
+time. The **`python -m lamb.memory_bench`** needle/passkey benchmark
+(`lamb/memory_bench.py`) then stresses it at length: trained at length 48,
+retrieval stays near-perfect to 4x and degrades gracefully to 8x, while a
+memoryless ablation is at chance -- and a capacity curve shows the honest
+fixed-state tradeoff (accuracy falls as bindings approach `d_mem`).
 
 ## 4. The model (`lamb/model/lamb.py`)
 

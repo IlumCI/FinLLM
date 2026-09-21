@@ -33,12 +33,30 @@ reversed vs. forward digits and Abacus on/off to attribute the gains.
 
 ## 3. infContext / test-time memory
 
-- **Associative recall** — already a unit test (`tests/test_memory.py`): a fresh
-  key->value map per episode, unsolvable without the memory.
+Shipped: **`python -m lamb.memory_bench`** (`lamb/memory_bench.py`) — a
+needle/passkey retrieval benchmark that plants a target key->value binding at the
+front of a sequence, buries it under distractor bindings and a long run of filler
+tokens, and queries it at the end. It reports two curves that are the signature of
+a fixed-size test-time memory, plus a memoryless ablation that isolates the
+memory:
+
+- **Unbounded context length (extrapolation).** Trained at length 48, the memory
+  retrieves at 1.00 through length 96, ~0.96 at 192 (4x), and ~0.73 at 384 (8x) --
+  well above chance (0.03) -- because the O(1) state is length-agnostic. The
+  memoryless model stays at chance at every length, confirming the neural memory
+  performs the retrieval.
+- **Bounded capacity (honest tradeoff).** At fixed length, accuracy falls from
+  ~1.00 (4 bindings) to ~0.37 (64 bindings) as the load approaches `d_mem=64` --
+  unbounded *length*, finite *capacity*, exactly the Titans/ATLAS property.
+
+Also covered by `tests/test_memory.py` (in-context associative recall) and
+`tests/test_memory_bench.py` (retrieval + extrapolation + ablation).
+
+Larger, external suites to add next:
+
 - **BABILong** — the long-context QA benchmark Titans/ATLAS report up to 10M
   tokens; the canonical infContext test.
-- **Needle-in-a-haystack / passkey retrieval / RULER** — retrieve a value planted
-  far back in a long stream. Scales the associative-recall test to real lengths.
+- **RULER** — a battery of long-context retrieval/aggregation probes.
 
 ## 4. Self-improvement
 

@@ -39,6 +39,14 @@ class NeuralMemory(nn.Module):
         self.to_v = nn.Linear(d_model, d_mem, bias=False)
         self.gate = nn.Linear(d_model, 2)  # -> (write-rate logit, retention logit)
         self.out = nn.Linear(d_mem, d_model, bias=False)
+        # Long-term-memory inductive bias: default to *retaining* (alpha ~ 0.95)
+        # and writing *sparingly* (eta small), so a binding survives across long
+        # spans of uninformative tokens until the model learns what to write. The
+        # gate stays data-dependent (small weights), it just starts biased.
+        nn.init.normal_(self.gate.weight, std=0.01)
+        with torch.no_grad():
+            self.gate.bias[0] = -1.0  # write rate: softplus(-1) ~ 0.31
+            self.gate.bias[1] = 3.0   # retention: sigmoid(3) ~ 0.95
 
     def forward(self, h: torch.Tensor, pad_mask: Optional[torch.Tensor] = None) -> torch.Tensor:
         b, t, _ = h.shape
