@@ -48,7 +48,7 @@ python -m lamb.train --solver grpo           # add a GRPO/RLVR term on the solve
 python -m lamb.train --red-queen             # Red Queen coevolution (league + novelty + relative fitness)
 python -m lamb.train --red-queen --open-ended --proposer factored_hyper   # open-ended grammar (Step 2)
 python -m lamb.poet                          # POET population of (env, agent) pairs (Step 3)
-python -m lamb.poet_shared                    # shared-backbone POET (one backbone + tiny adapters)
+python -m lamb.poet_shared                    # shared-backbone POET (LoRA adapters by default; --adapter-type hidden)
 python -m lamb.memory_bench                   # long-context needle/passkey retrieval (infContext)
 python -m lamb.ruler_bench                     # RULER/BABILong-style suite (NIAH, multi-key, variable tracking)
 ```
@@ -73,6 +73,7 @@ lamb/                     Python package (torch)
     transformer.py        RMSNorm, RoPE attention, SwiGLU, pre-norm block
     latent_core.py        depth-recurrent latent reasoning (+ optional ACT halting)
     memory.py             Titans/ATLAS-style test-time neural memory
+    lora.py               LoRA adapters for shared-backbone POET (deeper adaptation)
     lamb.py               the LAMb model: forward / loss / batched solve
   selfplay/
     proposer.py           learning-progress bandit (default; pluggable interface)

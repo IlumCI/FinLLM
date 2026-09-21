@@ -84,7 +84,11 @@ the solver must keep dominating its own past on an ever-advancing frontier.
   parameters of N full models at capacity 5), and the backbone accumulates
   cross-environment skill for implicit transfer. Measured: it grows, transfers, and
   conquers the base frontier, at lower absolute mastery than independent agents --
-  the honest efficiency/capacity tradeoff of a final-layer adapter.
+  the honest efficiency/capacity tradeoff of a final-layer adapter. A **deeper
+  LoRA adapter** (`--adapter-type lora`, `lamb/model/lora.py`) is also available:
+  it injects low-rank updates into the core's attention linears (not just the
+  final hidden), and at equal budget conquers the base frontier where the shallow
+  adapter does not, at ~4.5x the (still tiny) adapter parameters.
 - **Behavioural-novelty admission (implemented, `lamb/selfplay/novelty.py`).** Both
   POET variants gate reproduction on *behaviour*, not descriptor dedup: each
   candidate environment is characterised by its seed agent's competence across
@@ -93,8 +97,7 @@ the solver must keep dominating its own past on an ever-advancing frontier.
   archive of admitted environments (novelty search). Measured: the population still
   grows and conquers while ~12 behaviourally-redundant candidates are rejected --
   real diversity maintenance. Refs: novelty search (Lehman & Stanley); POET.
-  Remaining: LoRA/deeper adapters (adapt the core, not just the final hidden); GPU
-  scale-up of the agents.
+  Remaining: GPU scale-up of the agents.
 
 Refs: Digital Red Queen ([2601.03335](https://arxiv.org/abs/2601.03335));
 PopuLoRA ([2605.16727](https://arxiv.org/pdf/2605.16727)); learnable information

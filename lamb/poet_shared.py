@@ -22,6 +22,7 @@ import argparse
 import copy
 import random
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import List, Optional
 
@@ -34,6 +35,7 @@ from ._native import backend
 from .config import ModelConfig, POETConfig
 from .data import collate
 from .model.lamb import LAMb, build_model
+from .model.lora import LoRAInjector
 from .poet import Descriptor, complexity, neighbours
 from .selfplay.grammar import TaskGrammar
 from .selfplay.novelty import NoveltyArchive, behaviour_characterization
@@ -74,6 +76,13 @@ class SharedBackbonePOETTrainer:
             tokenizer,
         ).to(cfg.device)
         self.backbone_opt = torch.optim.AdamW(self.backbone.parameters(), lr=cfg.lr, weight_decay=0.01)
+        # Deeper adapters: LoRA injected into the core's Linears, or the shallow
+        # final-hidden bottleneck. One injector serves the whole population; each
+        # member owns its own LoRASet, selected per forward via set_active.
+        self.injector: Optional[LoRAInjector] = (
+            LoRAInjector(self.backbone, cfg.lora_targets, cfg.lora_rank, cfg.lora_alpha)
+            if cfg.adapter_type == "lora" else None
+        )
         self.members: List[SharedMember] = []
         self._rng = random.Random(cfg.seed)
         self._seed_ctr = 1
@@ -92,12 +101,33 @@ class SharedBackbonePOETTrainer:
         self._seed_ctr += 1
         return (self.cfg.seed * 1_000_003 + self._seed_ctr) & 0x7FFFFFFF
 
-    def _new_adapter(self) -> Adapter:
+    def _adapter_lr(self) -> float:
+        # LoRA on the sensitive attention linears prefers a gentler rate than the
+        # tiny final-hidden bottleneck (which benefits from a faster one).
+        return self.cfg.lr if self.injector is not None else self.cfg.lr * 3
+
+    def _new_adapter(self) -> nn.Module:
+        if self.injector is not None:
+            return self.injector.new_set().to(self.cfg.device)
         return Adapter(self.cfg.agent_d_model, self.cfg.adapter_rank).to(self.cfg.device)
+
+    @contextmanager
+    def _activate(self, adapter: nn.Module):
+        """Make ``adapter`` active for a forward: LoRA is applied via injector hooks
+        (yielding ``None`` for the hidden-adapter arg); a hidden adapter is passed
+        straight through as ``hidden_adapter``."""
+        if self.injector is not None:
+            self.injector.set_active(adapter)
+            try:
+                yield None
+            finally:
+                self.injector.set_active(None)
+        else:
+            yield adapter
 
     def _add(self, env: Descriptor, adapter: Optional[Adapter] = None) -> SharedMember:
         adapter = adapter or self._new_adapter()
-        opt = torch.optim.AdamW(adapter.parameters(), lr=self.cfg.lr * 3, weight_decay=0.0)
+        opt = torch.optim.AdamW(adapter.parameters(), lr=self._adapter_lr(), weight_decay=0.0)
         m = SharedMember(env=env, adapter=adapter, opt=opt, born=self.iter)
         self.members.append(m)
         return m
@@ -107,36 +137,41 @@ class SharedBackbonePOETTrainer:
         return collate(examples, self.tok.PAD, device=self.cfg.device)
 
     @torch.no_grad()
-    def _score(self, adapter: Adapter, env: Descriptor, n: Optional[int] = None) -> float:
+    def _score(self, adapter: nn.Module, env: Descriptor, n: Optional[int] = None) -> float:
         n = n or self.cfg.eval_tasks
         tasks = [self.grammar.sample(env, self._next_seed()) for _ in range(n)]
-        preds = self.backbone.solve([p for p, _ in tasks], self.tok,
-                                    max_answer_len=self._answer_len, device=self.cfg.device,
-                                    hidden_adapter=adapter)
+        with self._activate(adapter) as ha:
+            preds = self.backbone.solve([p for p, _ in tasks], self.tok,
+                                        max_answer_len=self._answer_len, device=self.cfg.device,
+                                        hidden_adapter=ha)
         ok = sum(1 for (_, a), pr in zip(tasks, preds) if pr is not None and pr == a)
         return ok / max(1, n)
 
     @torch.no_grad()
-    def _bc(self, adapter: Adapter, env: Descriptor):
+    def _bc(self, adapter: nn.Module, env: Descriptor):
         tasks = [self.grammar.sample(env, self._next_seed()) for _ in range(self.cfg.bc_tasks)]
-        solve = lambda probs, t: self.backbone.solve(  # noqa: E731
-            probs, self.tok, max_answer_len=self._answer_len, n_steps=t,
-            device=self.cfg.device, hidden_adapter=adapter)
+
+        def solve(probs, t):
+            with self._activate(adapter) as ha:
+                return self.backbone.solve(probs, self.tok, max_answer_len=self._answer_len,
+                                           n_steps=t, device=self.cfg.device, hidden_adapter=ha)
+
         return behaviour_characterization(solve, tasks)
 
     def _optimize(self) -> None:
         self.backbone.train()
         for m in self.members:
             m.adapter.train()
-            for _ in range(self.cfg.opt_steps):
-                loss, _ = self.backbone.compute_loss(self._batch(m.env, self.cfg.batch_size),
-                                                     hidden_adapter=m.adapter)
-                self.backbone_opt.zero_grad(set_to_none=True)
-                m.opt.zero_grad(set_to_none=True)
-                loss.backward()
-                torch.nn.utils.clip_grad_norm_(self.backbone.parameters(), 1.0)
-                self.backbone_opt.step()   # backbone updated by every environment
-                m.opt.step()               # adapter specialises its environment
+            with self._activate(m.adapter) as ha:
+                for _ in range(self.cfg.opt_steps):
+                    loss, _ = self.backbone.compute_loss(self._batch(m.env, self.cfg.batch_size),
+                                                         hidden_adapter=ha)
+                    self.backbone_opt.zero_grad(set_to_none=True)
+                    m.opt.zero_grad(set_to_none=True)
+                    loss.backward()
+                    torch.nn.utils.clip_grad_norm_(self.backbone.parameters(), 1.0)
+                    self.backbone_opt.step()   # backbone updated by every environment
+                    m.opt.step()               # adapter specialises its environment
             m.success = 0.6 * m.success + 0.4 * self._score(m.adapter, m.env)
 
     def _transfer(self) -> None:
@@ -151,7 +186,7 @@ class SharedBackbonePOETTrainer:
                     best_s, best_j = s, j
             if best_j >= 0:
                 m.adapter.load_state_dict(adapters[best_j].state_dict())
-                m.opt = torch.optim.AdamW(m.adapter.parameters(), lr=self.cfg.lr * 3, weight_decay=0.0)
+                m.opt = torch.optim.AdamW(m.adapter.parameters(), lr=self._adapter_lr(), weight_decay=0.0)
                 m.success = best_s
                 self.transfers += 1
 
@@ -173,7 +208,7 @@ class SharedBackbonePOETTrainer:
                         self.novelty_rejects += 1
                         continue
                     self.archive.add(bc)
-                opt = torch.optim.AdamW(seed.parameters(), lr=self.cfg.lr * 3, weight_decay=0.0)
+                opt = torch.optim.AdamW(seed.parameters(), lr=self._adapter_lr(), weight_decay=0.0)
                 births.append(SharedMember(env=child, adapter=seed, opt=opt, born=self.iter))
                 existing = existing | {child}
         self.members.extend(births)
@@ -204,6 +239,8 @@ class SharedBackbonePOETTrainer:
         return self.backbone.num_params()
 
     def adapter_params(self) -> int:
+        if self.injector is not None:
+            return self.injector.param_count()
         return sum(p.numel() for p in Adapter(self.cfg.agent_d_model, self.cfg.adapter_rank).parameters())
 
 
@@ -213,7 +250,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--pop-capacity", type=int, default=POETConfig.pop_capacity)
     p.add_argument("--agent-d-model", type=int, default=POETConfig.agent_d_model)
     p.add_argument("--agent-recurrent-steps", type=int, default=POETConfig.agent_recurrent_steps)
+    p.add_argument("--adapter-type", type=str, default="lora", choices=["hidden", "lora"],
+                   help="per-environment adapter: 'lora' (deeper, adapts the core) or 'hidden'")
     p.add_argument("--adapter-rank", type=int, default=POETConfig.adapter_rank)
+    p.add_argument("--lora-rank", type=int, default=POETConfig.lora_rank)
     p.add_argument("--opt-steps", type=int, default=POETConfig.opt_steps)
     p.add_argument("--eval-tasks", type=int, default=POETConfig.eval_tasks)
     p.add_argument("--max-depth", type=int, default=POETConfig.max_depth)
@@ -229,7 +269,8 @@ def main(argv=None) -> None:
     torch.manual_seed(args.seed)
     cfg = POETConfig(
         iters=args.iters, pop_capacity=args.pop_capacity, agent_d_model=args.agent_d_model,
-        agent_recurrent_steps=args.agent_recurrent_steps, adapter_rank=args.adapter_rank,
+        agent_recurrent_steps=args.agent_recurrent_steps, adapter_type=args.adapter_type,
+        adapter_rank=args.adapter_rank, lora_rank=args.lora_rank,
         opt_steps=args.opt_steps, eval_tasks=args.eval_tasks, max_depth=args.max_depth,
         max_digits=args.max_digits, seed=args.seed, device=args.device, log_every=args.log_every,
     )
@@ -238,7 +279,8 @@ def main(argv=None) -> None:
 
     bb, ad = trainer.backbone_params(), trainer.adapter_params()
     print(f"LAMb shared-backbone POET v{__version__} | native kernels: {backend()}")
-    print(f"backbone {bb:,} params + {ad:,}/adapter | pop_capacity {cfg.pop_capacity}")
+    print(f"adapter: {cfg.adapter_type} | backbone {bb:,} params + {ad:,}/adapter | "
+          f"pop_capacity {cfg.pop_capacity}")
     print(f"vs plain POET at capacity {cfg.pop_capacity}: {bb + ad * cfg.pop_capacity:,} "
           f"here vs {bb * cfg.pop_capacity:,} full models "
           f"({100 * (bb + ad * cfg.pop_capacity) / (bb * cfg.pop_capacity):.0f}% of the parameters)")

@@ -155,6 +155,10 @@ class POETConfig:
     agent_d_model: int = 96
     agent_recurrent_steps: int = 3
     adapter_rank: int = 16       # shared-backbone POET: per-environment adapter width
+    adapter_type: str = "hidden"  # "hidden" (final-layer bottleneck) | "lora" (deeper)
+    lora_rank: int = 8
+    lora_alpha: float = 8.0      # alpha == rank -> unit scaling (gentle for from-scratch)
+    lora_targets: Tuple[str, ...] = ("qkv", "proj")  # which core Linears LoRA adapts
 
     # Inner optimisation (expert iteration on the environment's exact answers).
     opt_steps: int = 4

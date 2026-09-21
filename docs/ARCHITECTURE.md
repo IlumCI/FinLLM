@@ -233,7 +233,11 @@ environment -- accumulates cross-environment skill, so a reproduced environment
 inherits a competent backbone (implicit transfer); explicit transfer just copies
 the small adapter. The tradeoff is honest: parameter-efficient, but a final-layer
 adapter specialises less than a full model, so absolute mastery is lower on the
-tiny setup (LoRA/deeper adapters are the roadmap's next step).
+tiny setup. A deeper **LoRA adapter** (`--adapter-type lora`, `lamb/model/lora.py`)
+injects low-rank updates into the core's attention linears via forward hooks (one
+`LoRASet` per environment, selected per forward); at equal budget it conquers the
+base frontier where the final-layer adapter does not, at ~4.5x the (still tiny)
+adapter parameters.
 
 ## Defaults
 
