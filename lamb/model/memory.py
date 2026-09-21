@@ -72,3 +72,34 @@ class NeuralMemory(nn.Module):
 
         read = torch.stack(reads, dim=1)  # (B, T, d_mem)
         return self.out(read)
+
+    def build_state(self, h: torch.Tensor) -> torch.Tensor:
+        """Write the whole sequence into memory and return the final state ``M``.
+
+        Unlike ``forward`` (which returns the per-position causal reads), this
+        exposes the accumulated ``(B, d_mem, d_mem)`` associative matrix so it can
+        be queried arbitrarily afterwards -- e.g. iterative dereferencing for
+        multi-hop retrieval.
+        """
+        b, t, _ = h.shape
+        hn = self.norm(h)
+        k = F.normalize(self.to_k(hn), dim=-1)
+        v = self.to_v(hn)
+        gates = self.gate(hn)
+        eta = F.softplus(gates[..., 0])
+        alpha = torch.sigmoid(gates[..., 1])
+        mem = torch.zeros(b, self.d_mem, self.d_mem, device=h.device, dtype=h.dtype)
+        for step in range(t):
+            k_t, v_t = k[:, step], v[:, step]
+            surprise = v_t - torch.einsum("bd,bde->be", k_t, mem)
+            update = torch.einsum("bd,be->bde", k_t, surprise)
+            a = alpha[:, step].view(b, 1, 1)
+            e = eta[:, step].view(b, 1, 1)
+            mem = a * mem + e * update
+        return mem
+
+    def read_state(self, mem: torch.Tensor, hidden: torch.Tensor) -> torch.Tensor:
+        """Query a built state ``mem`` with a hidden vector, returning a read
+        projected back to model width. ``hidden`` is ``(B, d_model)``."""
+        q = F.normalize(self.to_q(self.norm(hidden)), dim=-1)
+        return self.out(torch.einsum("bd,bde->be", q, mem))

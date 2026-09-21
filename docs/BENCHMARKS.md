@@ -49,14 +49,29 @@ memory:
   ~1.00 (4 bindings) to ~0.37 (64 bindings) as the load approaches `d_mem=64` --
   unbounded *length*, finite *capacity*, exactly the Titans/ATLAS property.
 
-Also covered by `tests/test_memory.py` (in-context associative recall) and
-`tests/test_memory_bench.py` (retrieval + extrapolation + ablation).
+Shipped: **`python -m lamb.ruler_bench`** (`lamb/ruler_bench.py`) — a
+RULER/BABILong-*style* battery. BABILong and RULER are natural-language suites, so
+the real datasets need the language-bridge fork; what ships here is RULER's
+*design* (a synthetic, model-agnostic set of long-context task families with
+configurable length) reconstructed over LAMb's symbols, on a model that does
+**memory + latent multi-hop together** (iterative dereferencing of the built
+memory state — no quadratic attention):
 
-Larger, external suites to add next:
+- **NIAH** (retrieve a bound value): ~0.7 across lengths, extrapolating from
+  training length 64 to 256 (4x).
+- **NIAH multi-key** (40 distractors): degrades with length — the retrieval-under-
+  load stress case.
+- **Variable tracking** (resolve `v1 := v2 := ... := literal`): `k` reads resolve a
+  `k`-hop chain (chain=2 ~0.54, chain=4 ~0.41 vs chance 0.06), while a
+  single-read ablation collapses to ~0.19 for any chain ≥ 2 — iterative memory
+  reads are what perform the multi-hop reasoning. As in the real RULER, variable
+  tracking is the hardest category and degrades with hop count.
 
-- **BABILong** — the long-context QA benchmark Titans/ATLAS report up to 10M
-  tokens; the canonical infContext test.
-- **RULER** — a battery of long-context retrieval/aggregation probes.
+Covered by `tests/test_memory.py`, `tests/test_memory_bench.py`, and
+`tests/test_ruler.py`.
+
+To add next: the real **BABILong** and **RULER** datasets, once a language front-end
+exists (see the bridge below).
 
 ## 4. Self-improvement
 
