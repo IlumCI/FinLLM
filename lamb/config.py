@@ -133,3 +133,46 @@ class TrainConfig:
                 for b in range(self.start_digits, self.max_digits + 1):
                     grid.append((op, a, b))
         return grid
+
+
+@dataclass
+class POETConfig:
+    """Red Queen Step 3: a POET-style population of (environment, agent) pairs.
+
+    Each environment is a grammar descriptor paired with its own specialist LAMb
+    solver. Agents are optimized on their environment; better agents are
+    transferred onto other environments; competent environments reproduce harder,
+    novel children (minimal-criterion + novelty gated), seeded by transfer. The
+    population is the capacity-scaling mechanism -- specialists + transfer reach a
+    frontier a single tiny solver cannot.
+    """
+
+    iters: int = 300
+    seed: int = 0
+    device: str = "cpu"
+
+    # Agents (per-environment specialists). Kept small for a CPU population.
+    agent_d_model: int = 96
+    agent_recurrent_steps: int = 3
+
+    # Inner optimisation (expert iteration on the environment's exact answers).
+    opt_steps: int = 4
+    batch_size: int = 64
+    lr: float = 2e-3
+    eval_tasks: int = 24         # tasks used to score an agent on an environment
+
+    # Population dynamics.
+    init_members: int = 2        # seed environments (depth 1, widths 1..init_members)
+    pop_capacity: int = 6
+    transfer_every: int = 8
+    transfer_margin: float = 0.10
+    reproduce_every: int = 12
+    reproduce_threshold: float = 0.6   # a parent this competent may spawn children
+    mc_high: float = 0.9         # a child not already (near-)solved by its seed agent
+    mastery_threshold: float = 0.9
+
+    # Grammar caps (the space is unbounded up to these for the demo).
+    max_depth: int = 4
+    max_digits: int = 4
+
+    log_every: int = 20

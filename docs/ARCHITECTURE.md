@@ -185,6 +185,28 @@ the model, which is the intended effect; sustained positive `dominance` is a
 scale-up (larger solver) result. Step 3 (a POET-style population of (task,
 solver) pairs with transfer) is the next roadmap item.
 
+## 9. POET population (Red Queen Step 3)
+
+`lamb/poet.py` (`python -m lamb.poet`). A population of `(environment, agent)`
+pairs, where an environment is a grammar descriptor and each agent is its own
+specialist LAMb solver. Per iteration: **optimize** every agent on its own
+environment (expert iteration on exact answers); periodically **transfer** (if
+another agent beats an environment's incumbent by a margin, it replaces the
+incumbent -- innovations cross between environments); **reproduce** (competent
+environments spawn harder, novel grammar-neighbour children, each seeded by its
+parent's agent and admitted only if the seed does not already solve it -- the
+minimal criterion); and **graduate** the easiest environments when over capacity.
+
+This is the capacity-scaling answer to Step 2's finding: rather than one larger
+model, a *population of specialists plus transfer* raises the ceiling. Reported
+metrics are the attempted frontier (hardest environment present), the peak
+conquered frontier (hardest environment mastered), and the transfer count.
+Measured on the tiny CPU population: the population grows and its attempted
+frontier advances while transfers fire, and it conquers base environments (e.g.
+`d1g1o1` to ~0.95); how high the *conquered* frontier climbs is set by per-agent
+optimization budget and agent size -- i.e. it scales. Following POET / Enhanced
+POET (arXiv:1901.01753, 2003.08536).
+
 ## Defaults
 
 Tiny CPU-first model: `d_model=128`, 1 prelude / 1 recurrent / 1 coda block,

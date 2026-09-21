@@ -67,10 +67,20 @@ the solver must keep dominating its own past on an ever-advancing frontier.
   sustained positive dominance is a scale-up result. This subsumes item 5 below.
   Refs: POET ([1901.01753](https://arxiv.org/abs/1901.01753)); Minimal Criterion
   Coevolution (Brant & Stanley).
-- **Step 3 (next).** Full **POET-style population** of (task, solver) pairs with
-  transfer between them; and, in tandem, scale the solver (roadmap item 7) so it
-  can keep climbing the now-unbounded frontier. Evaluate by relative fitness /
-  frontier-advancement rate.
+- **Step 3 (implemented, `python -m lamb.poet`).** A **POET-style population** of
+  (environment, agent) pairs (`lamb/poet.py`): per-environment specialist solvers,
+  agent **transfer** across environments, minimal-criterion + novelty
+  **reproduction** of harder environments, and graduation of easy ones. This is
+  the capacity-scaling mechanism -- specialists + transfer raise the ceiling Step 2
+  hit -- so it doubles as roadmap item 7. Measured: the population grows, its
+  attempted frontier advances, transfers fire, and it conquers base environments;
+  the conquered frontier scales with per-agent budget and size. Refs: POET
+  ([1901.01753](https://arxiv.org/abs/1901.01753)); Enhanced POET
+  ([2003.08536](https://arxiv.org/pdf/2003.08536)); Transfer Dynamics
+  ([2203.10941](https://arxiv.org/pdf/2203.10941)).
+  Remaining: GPU scale-up of the agents; behavioural-novelty (not just descriptor
+  dedup) admission; and a shared-backbone population (adapters per environment) to
+  cut the N-agents cost.
 
 Refs: Digital Red Queen ([2601.03335](https://arxiv.org/abs/2601.03335));
 PopuLoRA ([2605.16727](https://arxiv.org/pdf/2605.16727)); learnable information

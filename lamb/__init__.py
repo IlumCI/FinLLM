@@ -11,7 +11,7 @@ torch-backed pieces.
 from __future__ import annotations
 
 from ._native import USING_RUST, backend
-from .config import ModelConfig, TrainConfig
+from .config import ModelConfig, POETConfig, TrainConfig
 from .tokenizer import ArithmeticTokenizer, Encoded
 
 __version__ = "0.1.0"
@@ -22,6 +22,7 @@ __all__ = [
     "backend",
     "ModelConfig",
     "TrainConfig",
+    "POETConfig",
     "ArithmeticTokenizer",
     "Encoded",
 ]

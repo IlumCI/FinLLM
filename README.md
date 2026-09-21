@@ -47,6 +47,7 @@ python -m lamb.train --proposer grpo_hyper   # GRPO-trained hypernetwork propose
 python -m lamb.train --solver grpo           # add a GRPO/RLVR term on the solver
 python -m lamb.train --red-queen             # Red Queen coevolution (league + novelty + relative fitness)
 python -m lamb.train --red-queen --open-ended --proposer factored_hyper   # open-ended grammar (Step 2)
+python -m lamb.poet                          # POET population of (env, agent) pairs (Step 3)
 ```
 
 You will watch, from zero data:
@@ -81,7 +82,8 @@ lamb/                     Python package (torch)
     verifier.py           exact reward oracle (wraps the Rust kernels)
     loop.py               Absolute-Zero-style self-play trainer
   eval.py                 held-out accuracy, length generalization, test-time scaling
-  train.py                CPU-first end-to-end entry point
+  train.py                CPU-first end-to-end entry point (single-agent self-play)
+  poet.py                 POET population of (environment, agent) pairs (Step 3)
 rust/                     lamb_core native kernels (PyO3/maturin)
   src/arith.rs            exact recursive-descent integer evaluator + verifier
   src/curriculum.rs       deterministic problem sampler
@@ -126,8 +128,12 @@ grammar of nested expressions grown by **minimal-criterion admission**, with a
 **factored** hypernetwork proposer (fixed `D+G+O` outputs over an unbounded
 space). Measured: the space grows and the frontier advances with zero forgetting;
 `dominance` becomes bounded by *solver capacity* rather than task-space
-saturation — the ceiling moves from the curriculum to the model. Grounded in
-Digital Red Queen and POET/MCC.
+saturation — the ceiling moves from the curriculum to the model. Step 3
+(`python -m lamb.poet`) raises that ceiling with a **POET population**: per-
+environment specialist solvers, **transfer** across environments, and minimal-
+criterion **reproduction** of harder environments. Specialists + transfer are the
+capacity-scaling mechanism (rather than one larger model). Grounded in Digital Red
+Queen and POET/MCC.
 
 ## Benchmarks
 
