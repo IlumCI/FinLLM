@@ -22,6 +22,24 @@ with pure-Python fallbacks so everything runs even if the extension is not built
 
 ## Install
 
+### Environment
+
+`uv.lock` pins the exact dependency graph, torch included. Reproducing a number
+across machines needs that: torch changes kernel selection and reduction order
+between minor versions, and on a model this small those move accuracy rather than
+just low-order bits — a difference that would read as a finding. The lock is
+platform-portable (version pinned, no local build tag), so the same file serves CPU
+and CUDA boxes.
+
+```bash
+uv sync                  # exact pinned environment
+uv run python -m lamb.lotus
+```
+
+On Windows with a CUDA card, PyPI's `torch` wheel is CPU-only; add
+`--index-url https://download.pytorch.org/whl/cu124`. On Linux the default already
+includes CUDA.
+
 ```bash
 # 1. Python deps (CPU-only torch keeps it light)
 python -m pip install numpy
