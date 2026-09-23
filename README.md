@@ -68,10 +68,44 @@ You will watch, from zero data:
 - **test-time latent-step scaling**: accuracy is robust as `T` grows, because
   the latent depth is randomised during training.
 
+## Scaling and hardware (GPU + CPU + RAM hybrid)
+
+LAMb is CPU-first but device-agnostic, so it scales to a GPU with no code change.
+`lamb/device.py` is the single place that picks the device and precision:
+
+- **Accelerator does the neural compute.** Every entry point takes `--device`
+  (`auto` picks `cuda` > `mps` > `cpu`; or set `LAMB_DEVICE`) and `--amp/--no-amp`.
+  Mixed precision turns on automatically on CUDA (bf16 on Ampere+, else fp16 with
+  a gradient scaler) and stays **off on CPU** so the CPU path never regresses.
+- **CPU runs the exact Rust kernels** (`lamb_core`: verifier, curriculum sampler,
+  top-k store) alongside the accelerator — cheap, native, correctness-critical.
+- **RAM holds the buffers** (replay buffers, held-out eval sets, the exact
+  retrieval tier); `--threads` gives the CPU legs every core.
+
+```bash
+python -m lamb.train --device auto --scale small   # 2.0M params (256-wide)
+python -m lamb.train --device cuda --scale base --amp   # 7.9M params, bf16 on a GPU
+python -m lamb.coconut --device cuda --d-model 512      # Stage A on a GPU
+```
+
+Scale presets (`--scale`) grow width/depth/batch together:
+
+| preset | `d_model` | heads | recurrent steps | batch | params |
+| --- | --- | --- | --- | --- | --- |
+| `tiny` (default) | 96 | 4 | 4 | 64 | 0.28M |
+| `small` | 256 | 8 | 6 | 128 | 1.98M |
+| `base` | 512 | 8 | 8 | 256 | 7.90M |
+| `large` | 1024 | 16 | 12 | 512 | 31.5M |
+
+> The GPU path is implemented and unit-tested on CPU (autocast, scaler, scaling
+> presets); it has not been exercised on a physical GPU in this repo's CI, which is
+> CPU-only. On a CUDA box `--device auto` picks it up automatically.
+
 ## What's here
 
 ```
 lamb/                     Python package (torch)
+  device.py               device autodetect + mixed precision + scaling presets (GPU+CPU+RAM hybrid)
   tokenizer.py            number-native tokenizer (digits, Abacus, value channel)
   model/
     embeddings.py         token + Abacus + value embeddings

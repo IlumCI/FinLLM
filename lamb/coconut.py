@@ -46,6 +46,7 @@ import torch
 import torch.nn.functional as F
 
 from .config import CoconutConfig, ModelConfig
+from .device import Amp, add_hardware_args, device_report, resolve_device, resolve_hardware
 from .model.lamb import build_model
 from .selfplay.grammar import Descriptor, TaskGrammar
 from .selfplay.verifier import Verifier
@@ -119,7 +120,8 @@ class CoconutTrainer:
     def __init__(self, cfg: CoconutConfig, tokenizer: ArithmeticTokenizer, model_cfg: Optional[ModelConfig] = None):
         self.cfg = cfg
         self.tok = tokenizer
-        self.device = cfg.device
+        self.device = resolve_device(cfg.device)
+        self.amp = Amp(self.device, cfg.amp)
         torch.manual_seed(cfg.seed)
         random.seed(cfg.seed)
 
@@ -186,15 +188,12 @@ class CoconutTrainer:
 
         self.model.train()
         prompt, aids, aab, apad, targets, tmask = coconut_collate(pairs, self.tok, self.device)
-        logits, _ = self.model.coconut_logits(prompt, aids, aab, apad, k)
-        loss = _masked_ce(logits, targets, tmask)
-
         for g in self.opt.param_groups:
             g["lr"] = self._lr_at(step)
-        self.opt.zero_grad()
-        loss.backward()
-        torch.nn.utils.clip_grad_norm_(self.model.parameters(), c.grad_clip)
-        self.opt.step()
+        with self.amp.autocast():
+            logits, _ = self.model.coconut_logits(prompt, aids, aab, apad, k)
+            loss = _masked_ce(logits, targets, tmask)
+        self.amp.backward_step(loss, self.opt, self.model.parameters(), c.grad_clip)
         return {"loss": float(loss.detach()), "K": float(k)}
 
     # -- evaluation -------------------------------------------------------
@@ -247,8 +246,8 @@ class CoconutTrainer:
     # -- driver -----------------------------------------------------------
     def train(self) -> None:
         c = self.cfg
-        print(f"[coconut] backend={self.verifier.backend} "
-              f"task=depth{c.depth}/digits{c.digits}/ops{c.ops_key} "
+        print(f"[coconut] {device_report(self.device, self.amp)} backend={self.verifier.backend}")
+        print(f"[coconut] task=depth{c.depth}/digits{c.digits}/ops{c.ops_key} "
               f"thoughts~[{c.train_min_thoughts},{c.train_max_thoughts}] "
               f"bestof_dropout={c.thought_dropout} params={self.model.num_params()}")
         run_loss = 0.0
@@ -287,16 +286,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--seed", type=int, default=CoconutConfig.seed)
     p.add_argument("--d-model", type=int, default=96)
     p.add_argument("--recurrent-steps", type=int, default=4)
+    add_hardware_args(p)
     return p
 
 
 def main(argv: Optional[List[str]] = None) -> None:
     args = build_arg_parser().parse_args(argv)
+    device, amp = resolve_hardware(args)
     cfg = CoconutConfig(
         steps=args.steps, batch_size=args.batch_size, depth=args.depth,
         digits=args.digits, ops_key=args.ops_key, n_thoughts=args.n_thoughts,
         train_max_thoughts=args.train_max_thoughts,
-        thought_dropout=args.thought_dropout, seed=args.seed,
+        thought_dropout=args.thought_dropout, seed=args.seed, device=device, amp=amp,
     )
     tok = ArithmeticTokenizer()
     mcfg = ModelConfig(d_model=args.d_model, n_heads=4, d_ff=2 * args.d_model,

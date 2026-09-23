@@ -18,6 +18,7 @@ import torch
 from . import __version__
 from ._native import backend
 from .config import ModelConfig, TrainConfig
+from .device import add_hardware_args, device_report, resolve_hardware, scale_preset
 from .eval import evaluate_curriculum, length_generalization
 from .model.lamb import build_model
 from .selfplay.loop import SelfPlayTrainer
@@ -53,17 +54,29 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--novelty-coef", type=float, default=TrainConfig.novelty_coef,
                    help="diversity-maintenance weight on task selection (Red Queen)")
     p.add_argument("--seed", type=int, default=0)
-    p.add_argument("--device", type=str, default="cpu")
     p.add_argument("--eval-every", type=int, default=TrainConfig.eval_every)
     p.add_argument("--log-every", type=int, default=TrainConfig.log_every)
     p.add_argument("--ckpt-dir", type=str, default=TrainConfig.ckpt_dir)
     p.add_argument("--no-save", action="store_true")
+    p.add_argument("--scale", choices=["tiny", "small", "base", "large"], default=None,
+                   help="preset that scales width/depth/batch together (needs a GPU for the larger ones)")
+    add_hardware_args(p)  # --device / --amp / --no-amp / --threads
     return p
 
 
 def main(argv=None) -> None:
     args = build_arg_parser().parse_args(argv)
+    device, amp = resolve_hardware(args)
+    args.device = device  # concrete from here on
     torch.manual_seed(args.seed)
+
+    n_heads = ModelConfig.n_heads
+    if args.scale:
+        preset = scale_preset(args.scale)
+        args.d_model = preset["d_model"]
+        args.recurrent_steps = preset["recurrent_steps"]
+        args.batch_size = preset["batch_size"]
+        n_heads = preset["n_heads"]
 
     ops = tuple(o.strip() for o in args.ops.split(",") if o.strip())
     train_cfg = TrainConfig(
@@ -74,6 +87,7 @@ def main(argv=None) -> None:
         ops=ops,
         seed=args.seed,
         device=args.device,
+        amp=amp,
         eval_every=args.eval_every,
         log_every=args.log_every,
         ckpt_dir=args.ckpt_dir,
@@ -89,6 +103,7 @@ def main(argv=None) -> None:
     )
     model_cfg = ModelConfig(
         d_model=args.d_model,
+        n_heads=n_heads,
         recurrent_steps=args.recurrent_steps,
         use_memory=args.use_memory,
     )
@@ -97,10 +112,11 @@ def main(argv=None) -> None:
     model = build_model(model_cfg, tok).to(args.device)
     trainer = SelfPlayTrainer(train_cfg, model, tok)
 
-    print(f"LAMb v{__version__} | native kernels: {backend()}")
-    print(f"model params: {model.num_params():,} | difficulty cells: {len(trainer.grid)}")
-    print(f"ops={ops} max_digits={args.max_digits} recurrent_steps={args.recurrent_steps} "
-          f"use_memory={args.use_memory} device={args.device}")
+    print(f"LAMb v{__version__} | {device_report(args.device, trainer.amp)} | native kernels: {backend()}")
+    print(f"model params: {model.num_params():,} | difficulty cells: {len(trainer.grid)}"
+          f"{f' | scale={args.scale}' if args.scale else ''}")
+    print(f"ops={ops} max_digits={args.max_digits} d_model={args.d_model} "
+          f"recurrent_steps={args.recurrent_steps} use_memory={args.use_memory}")
     print(f"proposer={args.proposer} solver={args.solver} red_queen={args.red_queen} "
           f"open_ended={args.open_ended}")
     print("-" * 88)

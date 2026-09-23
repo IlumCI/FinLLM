@@ -39,6 +39,7 @@ import torch.nn.functional as F
 from ._native import evaluate, verify
 from .coconut import coconut_collate, _masked_ce
 from .config import CommConfig, ModelConfig
+from .device import Amp, add_hardware_args, device_report, resolve_device, resolve_hardware
 from .model.lamb import LAMb, build_model
 from .model.transformer import RMSNorm
 from .tokenizer import ArithmeticTokenizer
@@ -152,7 +153,8 @@ class CommTrainer:
     def __init__(self, cfg: CommConfig, tokenizer: ArithmeticTokenizer):
         self.cfg = cfg
         self.tok = tokenizer
-        self.device = cfg.device
+        self.device = resolve_device(cfg.device)
+        self.amp = Amp(self.device, cfg.amp)
         torch.manual_seed(cfg.seed)
         random.seed(cfg.seed)
 
@@ -221,16 +223,13 @@ class CommTrainer:
     def _train_step(self, step: int) -> float:
         self.speaker.train(); self.listener.train(); self.channel.train()
         samples = self.task.sample(self.cfg.batch_size)
-        messages = self._message([s[0] for s in samples], dropout=self.cfg.msg_dropout)
-        logits, targets, tmask = self._answer_logits(samples, messages)
-        loss = _masked_ce(logits, targets, tmask)
-
         for g in self.opt.param_groups:
             g["lr"] = self._lr_at(step)
-        self.opt.zero_grad()
-        loss.backward()
-        torch.nn.utils.clip_grad_norm_(self.opt.param_groups[0]["params"], self.cfg.grad_clip)
-        self.opt.step()
+        with self.amp.autocast():
+            messages = self._message([s[0] for s in samples], dropout=self.cfg.msg_dropout)
+            logits, targets, tmask = self._answer_logits(samples, messages)
+            loss = _masked_ce(logits, targets, tmask)
+        self.amp.backward_step(loss, self.opt, self.opt.param_groups[0]["params"], self.cfg.grad_clip)
         return float(loss.detach())
 
     # -- evaluation -------------------------------------------------------
@@ -281,6 +280,7 @@ class CommTrainer:
 
     def train(self) -> None:
         c = self.cfg
+        print(f"[comm] {device_report(self.device, self.amp)}")
         print(f"[comm] task=X({c.a_digits}d) op Y({c.b_digits}d) ops={''.join(c.ops)} "
               f"n_msg={c.n_msg} listen_thoughts={c.n_listen_thoughts} "
               f"channel_width={self.channel.width}/{c.d_model} "
@@ -330,16 +330,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--recurrent-steps", type=int, default=CommConfig.recurrent_steps)
     p.add_argument("--seed", type=int, default=CommConfig.seed)
     p.add_argument("--sweep", action="store_true", help="sweep channel bandwidth instead of one run")
+    add_hardware_args(p)
     return p
 
 
 def main(argv: Optional[List[str]] = None) -> None:
     args = build_arg_parser().parse_args(argv)
+    device, amp = resolve_hardware(args)
     cfg = CommConfig(
         steps=args.steps, batch_size=args.batch_size, a_digits=args.a_digits,
         b_digits=args.b_digits, n_msg=args.n_msg, n_listen_thoughts=args.n_listen_thoughts,
         bottleneck=args.bottleneck, channel_noise=args.channel_noise, d_model=args.d_model,
-        recurrent_steps=args.recurrent_steps, seed=args.seed,
+        recurrent_steps=args.recurrent_steps, seed=args.seed, device=device, amp=amp,
     )
     tok = ArithmeticTokenizer()
     if args.sweep:

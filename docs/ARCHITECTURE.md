@@ -384,9 +384,18 @@ code into a shared one -- the Other-Play prescription (arXiv:2003.02979) realize
 a population of agents that reason and coordinate in a common latent language,
 none of them ever leaving latent space.
 
-## Defaults
+## Defaults and scaling
 
 Tiny CPU-first model: `d_model=128`, 1 prelude / 1 recurrent / 1 coda block,
 `recurrent_steps=4`, ~0.5M parameters. Grid: `{+,-} × {1,2 digits}²`. These reach
 full 1-digit mastery in minutes and climb on 2-digit; larger `d_model`, more
 `recurrent_steps`, and more `steps` extend the mastered frontier.
+
+**Hardware (GPU + CPU + RAM hybrid, `lamb/device.py`).** The architecture is
+device-agnostic: `resolve_device` auto-selects `cuda` > `mps` > `cpu`, `Amp` adds
+bf16/fp16 autocast (+ gradient scaler) automatically on CUDA and stays fp32 on CPU
+(no regression), while the exact Rust kernels run on CPU alongside the accelerator
+and RAM holds the buffers/stores. Every entry point takes `--device/--amp/--threads`;
+`--scale {tiny,small,base,large}` grows width/depth/batch together (0.28M → 1.98M →
+7.90M → 31.5M params). The GPU path is unit-tested on CPU (forced bf16 autocast) and
+picked up automatically by `--device auto` on a CUDA box.

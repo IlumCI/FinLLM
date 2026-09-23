@@ -89,7 +89,8 @@ class FactoredHyperProposer(BaseProposer, nn.Module):
     def probs(self, s: np.ndarray) -> np.ndarray:
         with torch.no_grad():
             dlp, glp, olp = self._factor_logps(s)
-        dlp, glp, olp = dlp.numpy(), glp.numpy(), olp.numpy()
+        dlp, glp, olp = (dlp.detach().cpu().numpy(), glp.detach().cpu().numpy(),
+                         olp.detach().cpu().numpy())
         descs = self.cur.descriptors()
         scores = np.array([dlp[d.depth - 1] + glp[d.digits - 1] + olp[d.ops_key] for d in descs])
         scores -= scores.max()

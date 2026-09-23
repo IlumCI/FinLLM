@@ -76,7 +76,7 @@ class GRPOHyperProposer(BaseProposer, nn.Module):
 
     def probs(self, s: np.ndarray) -> np.ndarray:
         with torch.no_grad():
-            p = torch.softmax(self._logits(s), dim=0).numpy().astype(np.float64)
+            p = torch.softmax(self._logits(s), dim=0).detach().cpu().numpy().astype(np.float64)
         p = (1.0 - self.eps) * p + self.eps / self.n_cells
         return p / p.sum()
 

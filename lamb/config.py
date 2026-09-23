@@ -10,7 +10,7 @@ memory, and the self-play loop.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 
 @dataclass
@@ -59,6 +59,7 @@ class TrainConfig:
     grad_clip: float = 1.0
     seed: int = 0
     device: str = "cpu"
+    amp: Optional[bool] = None  # mixed precision; None => auto (on for CUDA, off for CPU)
 
     # Randomised latent depth during training: sampling the number of recurrent
     # "thinking" steps each step makes the model robust to the test-time budget,
@@ -167,6 +168,7 @@ class CoconutConfig:
     grad_clip: float = 1.0
     seed: int = 0
     device: str = "cpu"
+    amp: Optional[bool] = None  # mixed precision; None => auto (on for CUDA, off for CPU)
 
     # Task space: nested-expression grammar (multi-step is where a latent
     # scratchpad can help). Depth 2 = ``(a op b) op (c op d)``.
@@ -230,6 +232,7 @@ class CommConfig:
     grad_clip: float = 1.0
     seed: int = 0
     device: str = "cpu"
+    amp: Optional[bool] = None  # mixed precision; None => auto (on for CUDA, off for CPU)
 
     # Split task: speaker sees X (a_digits), listener sees op and Y (b_digits) and
     # must output X op Y. Neither half determines the answer alone.
@@ -283,6 +286,7 @@ class POETConfig:
     iters: int = 300
     seed: int = 0
     device: str = "cpu"
+    amp: Optional[bool] = None  # mixed precision; None => auto (on for CUDA, off for CPU)
 
     # Agents (per-environment specialists). Kept small for a CPU population.
     agent_d_model: int = 96

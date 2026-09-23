@@ -216,7 +216,19 @@ operation-preserving embeddings; sweep digit base and reversal.
 
 Refs: *Numbers Already Carry Their Own Embeddings* ([2606.14108](https://arxiv.org/html/2606.14108v1)); BitTokens.
 
-## 7. Scale-up path
+## 7. Scale-up path (GPU + CPU + RAM hybrid) — implemented
 
-GPU training, mixed precision, larger `d_model`/depth, and a serving mode. The
-architecture is unchanged; only config and device move.
+`lamb/device.py` makes every entry point device-agnostic and mixed-precision-ready
+with no architecture change. `resolve_device` auto-selects `cuda` > `mps` > `cpu`
+(`--device`, `LAMB_DEVICE`); `Amp` turns on bf16/fp16 autocast (+ gradient scaler)
+on CUDA automatically and stays fp32 on CPU so the CPU path never regresses; the
+exact Rust kernels keep running on CPU alongside the accelerator and RAM holds the
+buffers/stores; `--threads` gives the CPU legs every core. `--scale
+{tiny,small,base,large}` grows width/depth/batch together (0.28M → 1.98M → 7.90M →
+31.5M params). Wired into `train`, `coconut`, `comm`, `comm_pop`; covered by
+`tests/test_device.py`. The GPU path is unit-tested on CPU (forced bf16 autocast);
+it has not been run on a physical GPU in this repo (CI is CPU-only), but
+`--device auto` picks CUDA up with no code change.
+
+Remaining: multi-GPU (FSDP / tensor-parallel) for the `large`+ regime, a serving
+mode, and `torch.compile` once shapes are static.

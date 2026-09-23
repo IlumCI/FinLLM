@@ -33,6 +33,7 @@ from ._native import verify
 from .coconut import _masked_ce, coconut_collate
 from .comm import Channel, CommTask, _decode_answer
 from .config import CommConfig, ModelConfig
+from .device import Amp, add_hardware_args, device_report, resolve_device, resolve_hardware
 from .model.lamb import LAMb
 from .model.lamb import build_model
 from .tokenizer import ArithmeticTokenizer
@@ -82,7 +83,8 @@ class PopulationComm:
                  n_speakers: Optional[int] = None, n_listeners: Optional[int] = None):
         self.cfg = cfg
         self.tok = tok
-        self.device = cfg.device
+        self.device = resolve_device(cfg.device)
+        self.amp = Amp(self.device, cfg.amp)
         torch.manual_seed(cfg.seed)
         random.seed(cfg.seed)
 
@@ -117,22 +119,19 @@ class PopulationComm:
     def _train_step(self, step: int) -> float:
         for m in self.speakers + self.listeners + self.channels:
             m.train()
-        loss = torch.zeros((), device=self.device)
-        for j in range(self.Q):  # every listener trained each step, on a random partner
-            i = random.choice(self._speakers_for(j))
-            samples = self.task.sample(self.cfg.batch_size)
-            messages = _message(self.speakers[i], self.cfg, self.tok, [s[0] for s in samples], self.device)
-            logits, targets, tmask = _answer_logits(
-                self.listeners[j], self.channels[j], self.cfg, self.tok, samples, messages, self.device)
-            loss = loss + _masked_ce(logits, targets, tmask)
-        loss = loss / self.Q
-
         for g in self.opt.param_groups:
             g["lr"] = self._lr_at(step)
-        self.opt.zero_grad()
-        loss.backward()
-        torch.nn.utils.clip_grad_norm_(self.opt.param_groups[0]["params"], self.cfg.grad_clip)
-        self.opt.step()
+        with self.amp.autocast():
+            loss = torch.zeros((), device=self.device)
+            for j in range(self.Q):  # every listener trained each step, on a random partner
+                i = random.choice(self._speakers_for(j))
+                samples = self.task.sample(self.cfg.batch_size)
+                messages = _message(self.speakers[i], self.cfg, self.tok, [s[0] for s in samples], self.device)
+                logits, targets, tmask = _answer_logits(
+                    self.listeners[j], self.channels[j], self.cfg, self.tok, samples, messages, self.device)
+                loss = loss + _masked_ce(logits, targets, tmask)
+            loss = loss / self.Q
+        self.amp.backward_step(loss, self.opt, self.opt.param_groups[0]["params"], self.cfg.grad_clip)
         return float(loss.detach())
 
     @torch.no_grad()
@@ -168,6 +167,7 @@ class PopulationComm:
 
     def train(self) -> Dict[str, object]:
         c = self.cfg
+        print(f"[comm-pop] {device_report(self.device, self.amp)}")
         print(f"[comm-pop] {self.P} speakers x {self.Q} listeners, diagonal held out "
               f"({len(self.holdout)} pairings zero-shot); task X({c.a_digits}d) op Y({c.b_digits}d)")
         run = 0.0
@@ -198,15 +198,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--d-model", type=int, default=CommConfig.d_model)
     p.add_argument("--eval-tasks", type=int, default=256)
     p.add_argument("--seed", type=int, default=CommConfig.seed)
+    add_hardware_args(p)
     return p
 
 
 def main(argv: Optional[List[str]] = None) -> None:
     args = build_arg_parser().parse_args(argv)
+    device, amp = resolve_hardware(args)
     cfg = CommConfig(steps=args.steps, batch_size=args.batch_size, a_digits=args.a_digits,
                      b_digits=args.b_digits, n_msg=args.n_msg, d_model=args.d_model,
                      pop_speakers=args.speakers, pop_listeners=args.listeners,
-                     eval_tasks=args.eval_tasks, seed=args.seed)
+                     eval_tasks=args.eval_tasks, seed=args.seed, device=device, amp=amp)
     tok = ArithmeticTokenizer()
     grid = PopulationComm(cfg, tok).train()
     verdict = "CANONICAL (zero-shot coordination emerges)" if grid.get("holdout_mean", 0) >= 0.6 \

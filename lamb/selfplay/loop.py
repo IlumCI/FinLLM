@@ -32,6 +32,7 @@ import torch
 
 from ..config import TrainConfig
 from ..data import collate
+from ..device import Amp
 from ..model.lamb import LAMb
 from ..tokenizer import ArithmeticTokenizer
 from . import grpo as grpo_utils
@@ -76,6 +77,7 @@ class SelfPlayTrainer:
         self.proposer = proposer or self._build_proposer()
 
         self.opt = torch.optim.AdamW(model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
+        self.amp = Amp(cfg.device, cfg.amp)
 
         # GRPO/RLVR keeps a frozen reference policy for the KL term.
         self.ref_model: Optional[LAMb] = None
@@ -219,7 +221,8 @@ class SelfPlayTrainer:
         n_steps = None
         if cfg.sample_train_depth:
             n_steps = self._rng.randint(cfg.train_min_steps, cfg.train_max_steps)
-        loss, metrics = self.model.compute_loss(batch, n_steps=n_steps)
+        with self.amp.autocast():
+            loss, metrics = self.model.compute_loss(batch, n_steps=n_steps)
 
         extra: Dict[str, float] = {}
         # GRPO/RLVR term on the solver (added to expert CE after a warm start).
@@ -229,10 +232,7 @@ class SelfPlayTrainer:
             if gloss is not None:
                 loss = loss + cfg.grpo_coef * gloss
 
-        self.opt.zero_grad(set_to_none=True)
-        loss.backward()
-        torch.nn.utils.clip_grad_norm_(self.model.parameters(), cfg.grad_clip)
-        self.opt.step()
+        self.amp.backward_step(loss, self.opt, self.model.parameters(), cfg.grad_clip)
 
         if self.ref_model is not None and (self.step + 1) % cfg.grpo_ref_update_every == 0:
             self.ref_model.load_state_dict(self.model.state_dict())
