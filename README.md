@@ -54,6 +54,7 @@ python -m lamb.ruler_bench                     # RULER/BABILong-style suite (NIA
 python -m lamb.coconut                         # Coconut continuous-thought reasoning + verifier best-of-N (Stage A)
 python -m lamb.lotus                           # Stage A restructured: parallel supervised latents (the scalable family)
 python -m lamb.lotus --trace-coef 0             # ablation: parallel latents, answer-only supervision
+python -m lamb.latent_rl                       # does on-policy RL move the latent block? (measured: no)
 python -m lamb.comm                            # latent inter-agent communication: message = a thought vector (Stage B)
 python -m lamb.comm --sweep                     # channel-bandwidth (capacity) sweep with DRU noise
 python -m lamb.comm_transfer                     # held-out-partner test: is the latent code private or shareable?

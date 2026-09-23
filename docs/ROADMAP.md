@@ -227,6 +227,51 @@ few errors to fit against; at depth 3 it only reaches 9%, and the balanced sampl
 regime where the model is competent *and* fallible (~50-70%), which this tiny model
 on these tasks does not provide. The interface ships; the claim does not.
 
+### 3a-ii. Does on-policy RL move the latent block? No — premise falsified
+
+The boundary tokens in 3a-i were justified by SWITCH's claim that they unblock RL
+over latent recurrence. `lamb/latent_rl.py` (`python -m lamb.latent_rl`) tests that
+claim instead of assuming it.
+
+Testing it honestly requires being precise about what RL could shape. Sampling
+answer tokens has a well-defined log-probability with or without boundaries, but it
+only shapes the *answer head* — never the latent computation. So the boundary has
+to buy a **sampled action that changes the latent computation itself**: a switch
+head on the boundary hidden state picks the latent budget (how many latent
+positions stay active, applied by masking). It is sampled, has an exact
+log-probability, and demonstrably changes the computation (asserted in tests).
+Three arms run from one shared supervised checkpoint, same step budget, same eval:
+
+| arm | acc | Δ from SFT start |
+| --- | --- | --- |
+| SFT start | 0.266 | — |
+| + 300 more **supervised** steps | **0.645** | **+0.379** |
+| + GRPO, switch action (boundary) | 0.262 | −0.004 |
+| + GRPO, switch + entropy bonus | 0.301 | +0.035 |
+| + GRPO, answer-only (the 2512.11816 setting) | 0.254 | −0.012 |
+
+**RL is inert.** At best +0.035 where the same step budget spent supervised gives
++0.379 — an order of magnitude worse. This reproduces arXiv:2512.11816 (GRPO moved
+a latent model 22.6 → 21.8) and, more importantly, the boundary tokens did **not**
+rescue it: the switch arm is indistinguishable from answer-only. The 3a-i entry
+boundary keeps its measured +5.9 accuracy gain, but the *reason* it was built does
+not hold here.
+
+Observed mechanism, and an honest limit of this test: the switch policy collapsed
+to a single budget (max) within ~100 steps, entropy 0.09 → 0.01, and an entropy
+bonus did not prevent it. That collapse is partly **by construction** — with
+budgets (2, 4, 8) and no cost on compute, "always max" is genuinely optimal, so
+there is no allocation policy to discover. For RL to shape latent compute
+allocation the reward must *price* compute. Other uncontrolled factors: one seed,
+RL lr (2e-4) and KL coefficient not swept. What is solid is the size of the gap:
+RL ≈ 0 against SFT +0.379 is far outside any noise band here.
+
+Next, if this is revisited: a reward that charges for latent compute
+(`correct − λ·budget`), so allocation is a real tradeoff rather than a dominated
+choice. Until then, **do not plan on RL as the self-improvement mechanism for the
+latent path** — the verifier-selected best-of-N search in 3 remains the mechanism
+that measurably works.
+
 ## 3b. Latent inter-agent communication (Coconut) — Stage B implemented
 
 Implemented in `lamb/comm.py` (`python -m lamb.comm`). The message passed between
