@@ -240,6 +240,14 @@ class LotusConfig:
     depth: int = 2
     digits: int = 1
     ops_key: int = 0
+    # Operand-width range for training. 0 means 'just `digits`'. A range is
+    # what makes a width-extrapolation claim testable at all: the residue of
+    # a number is a digit sum whose coefficients repeat every ord_p(10)
+    # positions, so a run has to *see* that many positions before the pattern
+    # is learnable -- and every wider number is then free. Training at one
+    # width can only ever teach position 0.
+    digits_min: int = 0
+    digits_max: int = 0
 
     # The parallel latent block.
     n_latent: int = 8        # L latent positions, computed together
@@ -258,6 +266,19 @@ class LotusConfig:
     space_coef: float = 0.0
     space_dim: int = 32
     space_tau: float = 0.1
+    # The latent ALU (:mod:`lamb.alu`). ``alu_coef > 0`` re-reads the latent block
+    # as one *value* per slot, coded in a residue number system, instead of one
+    # *digit token* per slot. The answer is then composed by exact arithmetic
+    # rather than read out by the network, so magnitude extrapolation stops being
+    # something the network has to learn. ``alu_consistency_coef`` weights the
+    # label-free agreement between the model's stated answer and the composed one --
+    # the term that is defined on problems with no known answer.
+    alu_coef: float = 0.0
+    alu_consistency_coef: float = 0.1
+    # Short multiplicative order of 10 (see lamb.algebra.DEFAULT_MODULI): the
+    # digit-coefficient pattern repeats every ord_p(10) positions, so a long
+    # order makes a modulus useless at the operand widths training reaches.
+    alu_moduli: tuple = (2, 5, 9, 11, 7, 13, 37)
     trace_coef: float = 0.5  # weight on per-position supervision (0 => answer-only ablation)
 
     # SWITCH-style boundary tokens (arXiv:2606.13106) wrapping the latent segment.

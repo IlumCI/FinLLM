@@ -460,6 +460,97 @@ mid-2026 results rather than from this repo's own logic:
 Both default to **off**. They are arms to be measured on the harness in 3a-iv, not
 claims — which is the discipline the boundary saga and the RL arm should have had.
 
+### 3a-vi. The latent ALU: the latents hold values and the algebra does the arithmetic
+
+Every latent-reasoning method supervises latents against **tokens** — LOTUS against
+gold CoT tokens, SIM-CoT against a decoder's, C-MTP against averaged embeddings, and
+3a above against the digits of LAMb's own trace. A token target teaches a latent to
+*name* a number; it says nothing about what numbers *are*. So composition — which is
+what reasoning consists of — has to be relearned by the network at every magnitude
+it meets. That is the arithmetic length-generalization wall.
+
+Models that *do* extrapolate turn out to have found a **periodic** representation by
+themselves: tokens as phases, addition as rotation
+([2511.23443](https://arxiv.org/abs/2511.23443) proves the benefit for modular
+addition; [2606.17399](https://arxiv.org/abs/2606.17399) finds multiplication reduced
+to addition in discrete-log space by the same mechanism). The usual response is to
+bake periodicity into the **positional** encoding — Abacus
+([2405.17399](https://arxiv.org/abs/2405.17399), already in this model) and position
+coupling ([2405.20671](https://arxiv.org/abs/2405.20671)) — which *helps the network
+find* the algorithm. The network still has to run it.
+
+LAMb is in a position a language model is not: an exact evaluator hands it the true
+value of every intermediate of every problem, free and unannotated. That is enough to
+skip the discovery and hand the latent space the algebra outright. `lamb/algebra.py`
+and `lamb/alu.py`:
+
+- a latent slot carries one **value**, coded as its residues modulo a set of coprime
+  moduli (a residue number system);
+- composition is exact and carry-free — `(a+b) mod p` is a cyclic convolution of the
+  residue distributions, `(a−b) mod p` a cross-correlation, `(a·b) mod p` one small
+  table — and differentiable, so a model *uncertain* about a residue composes its
+  uncertainty rather than having to commit first;
+- the answer is built **bottom-up from the leaf slots by the algebra**, not read out
+  by the network. The network is only ever asked for a leaf: two literals, one
+  operator, whatever the expression's depth.
+
+RNS is classical, but in neural networks it has only ever been used for **hardware
+efficiency** ([1712.04614](https://arxiv.org/abs/1712.04614),
+[2306.09481](https://arxiv.org/abs/2306.09481),
+[2408.05639](https://arxiv.org/abs/2408.05639)). Using it as the *reasoning*
+representation, supervised from a free exact trace, is the new part.
+
+**The moduli are chosen for the order of 10, not for size.** The network produces
+`n mod p` from digits as `Σ dᵢ·(10ⁱ mod p)`, whose coefficients repeat every
+`ord_p(10)` positions — and that period is exactly how many digit positions a run
+must *see* before the modulus is learnable, with every wider number free afterwards.
+Small primes are a trap: `ord(10)` is 16 mod 17, 18 mod 19, 22 mod 23. The default
+`(2,5,9,11,7,13,37)` has max period 6 in 84 units, strictly dominating the obvious
+`(7,11,13,17,19,23)` (90 units, period 22). Three of them are the schoolbook
+divisibility rules — mod 9 the digit sum, mod 11 the alternating sum, mod 2 and 5 the
+last digit — which extrapolate at any width immediately.
+
+**What holds without any training** (`tests/test_algebra.py`, `tests/test_alu.py`):
+exact round-trip over the whole signed ring; exact composition of `+`, `−`, `×` at
+every magnitude in range; and, given correct leaf codes, an exact answer at **depth 6
+— a 64-operand expression — with nothing learned about depth**.
+
+**What this does *not* claim, stated plainly:**
+
+- *"Depth is free" applies to the composition, not to end-to-end accuracy.* The leaf
+  count grows as `2^(D−1)` and every leaf needs all its residues right, so accuracy
+  falls roughly as `leaf_residue_acc ^ (n_moduli · n_leaves)`. CRT has no locality: one
+  wrong residue is a wildly wrong answer, not a near one. Redundant moduli are the
+  classical fix and would double as a second label-free error signal; not yet built.
+- *The slot addressing does not extrapolate the way the algebra does.* Training at
+  depth 2 only ever writes slots 0–1, so slot 6's embedding is untrained and a
+  depth-4 evaluation asks the model to use slots it has never used. Depth transfer
+  therefore needs mixed-depth training; it is not free.
+- *The expression tree is read from the input.* That is legitimate here — the tree is
+  the question, not the answer — but a natural-language problem does not come with
+  one. The bridge needs the model to **emit** the structure, at which point the slots
+  become registers and the selectors become instructions: a differentiable register
+  machine over the algebra. The gold program is free from the same generator, so it
+  can be supervised before being relaxed — which is how to avoid the instability that
+  sank earlier neural program induction.
+- *The consistency check is not usable yet.* Measured at 400 steps, leaf-residue
+  accuracy is **0.985** while the root slot sits at **0.229**, barely above chance:
+  the model specialises on leaves exactly as intended, because composition is no
+  longer its job, so it never learns to state the answer. A check that compares a
+  near-chance direct prediction against a good composed one carries little signal.
+  The term is implemented (`alu_consistency_coef`) and **off by default** — training
+  on it invites the model to satisfy agreement by routing rather than by being right,
+  which makes it worth more as a measurement than as a loss until it has been
+  measured.
+
+**Pre-registered test.** Train on operand widths 1–4, evaluate at width 5. The moduli
+`(16,25,27,11,37)` have coefficient patterns fully determined by digit position 3, so
+widths 1–4 see every pattern and width 5 is pure periodicity. Prediction: the ALU
+holds and the token-trace baseline falls. If the ALU does not hold at width 5, the
+residue representation is not buying what it claims and this is mostly dead.
+
+Results: pending (`scratchpad/width_test.py`).
+
 ## 3b. Latent inter-agent communication (Coconut) — Stage B implemented
 
 Implemented in `lamb/comm.py` (`python -m lamb.comm`). The message passed between

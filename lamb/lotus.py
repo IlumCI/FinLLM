@@ -39,6 +39,8 @@ from typing import Dict, List, Optional, Tuple
 import torch
 import torch.nn as nn
 
+from .alu import LatentALU, parse_expr, slot_order
+from .algebra import ResidueSystem
 from .coconut import _masked_ce, coconut_collate
 from .comm import _decode_answer
 from .config import LotusConfig, ModelConfig
@@ -74,7 +76,8 @@ class LotusReasoner(nn.Module):
 
     def __init__(self, model: LAMb, n_latent: int, loops: int,
                  bot_id: Optional[int] = None, eot_id: Optional[int] = None,
-                 trace_compress: int = 1, space_dim: int = 0):
+                 trace_compress: int = 1, space_dim: int = 0,
+                 alu_moduli: Optional[Tuple[int, ...]] = None):
         super().__init__()
         self.model = model
         self.n_latent = int(n_latent)
@@ -127,6 +130,10 @@ class LotusReasoner(nn.Module):
         # ``space_dim = 0`` builds no head at all, so it is off, not merely zeroed.
         self.space_head = (nn.Sequential(RMSNorm(d), nn.Linear(d, space_dim))
                            if space_dim > 0 else None)
+        # The latent ALU (:mod:`lamb.alu`). Built only when asked for, so the
+        # parameter count is untouched when it is off.
+        self.alu = (LatentALU(d, ResidueSystem(tuple(alu_moduli)))
+                    if alu_moduli else None)
 
     def _marker(self, token_id: int, b: int, device) -> torch.Tensor:
         """Embed a boundary token as an ordinary token (B, 1, d)."""
@@ -260,9 +267,32 @@ class LotusTrainer:
         model = build_model(mcfg, tokenizer).to(self.device)
         bot = tokenizer.BOT if cfg.use_boundaries else None
         eot = tokenizer.EOT if (cfg.use_boundaries and cfg.use_exit_boundary) else None
-        self.reasoner = LotusReasoner(model, cfg.n_latent, cfg.loops, bot, eot,
-                                      cfg.trace_compress,
-                                      cfg.space_dim if cfg.space_coef > 0 else 0).to(self.device)
+        self.reasoner = LotusReasoner(
+            model, cfg.n_latent, cfg.loops, bot, eot, cfg.trace_compress,
+            cfg.space_dim if cfg.space_coef > 0 else 0,
+            tuple(cfg.alu_moduli) if cfg.alu_coef > 0 else None).to(self.device)
+        # ALU slot layout: slots 0..T-1 hold the T = 2^depth - 2 intermediates in
+        # the grammar's post-order; the root goes in the **last** slot. One slot per
+        # *value*, so the budget tracks reasoning steps rather than digits --
+        # depth-3 wants 7 slots here against 14 for the token trace.
+        #
+        # The root is pinned to the last index rather than to T because T moves with
+        # depth (2, 6, 14, ...). Indexing it by T would put the answer in a different
+        # place at every depth, so a model trained at one depth would be reading an
+        # untrained slot at another -- which silently breaks the depth-transfer
+        # experiment this layout exists to make possible.
+        self.n_inter = 2 ** cfg.depth - 2
+        self.root_slot = cfg.n_latent - 1
+        if cfg.alu_coef > 0 and cfg.trace_coef > 0:
+            raise ValueError(
+                "alu_coef and trace_coef both target the latent slots but mean "
+                "different things by them -- one value per slot versus one digit "
+                "token per slot. Running both puts contradictory targets on the "
+                "same hidden state. Set trace_coef=0 for the ALU arm.")
+        if cfg.alu_coef > 0 and cfg.n_latent < self.n_inter + 1:  # +1 for the root
+            raise ValueError(
+                f"n_latent={cfg.n_latent} cannot hold {self.n_inter} intermediates "
+                f"plus a root slot at depth {cfg.depth}")
         self.opt = torch.optim.AdamW(self.reasoner.parameters(), lr=cfg.lr,
                                      weight_decay=cfg.weight_decay)
         self.grammar = TaskGrammar()
@@ -273,15 +303,24 @@ class LotusTrainer:
         self.truncated = 0   # traces that did not fit in n_latent (diagnostic)
 
     # -- data -------------------------------------------------------------
+    def _widths(self) -> List[int]:
+        c = self.cfg
+        if c.digits_min and c.digits_max:
+            return list(range(c.digits_min, c.digits_max + 1))
+        return [c.digits]
+
     def _sample_batch(self, n: int) -> List[Task]:
         out: List[Task] = []
+        widths = self._widths()
         for _ in range(n):
             self._seed += 1
-            out.append(self.grammar.sample_with_trace(self.descriptor, self._seed,
+            d = Descriptor(self.cfg.depth, widths[self._seed % len(widths)],
+                           self.cfg.ops_key)
+            out.append(self.grammar.sample_with_trace(d, self._seed,
                                                       exclude_heldout=True))
         return out
 
-    def _eval_set(self, n: int) -> List[Task]:
+    def _eval_set(self, n: int, digits: Optional[int] = None) -> List[Task]:
         """Held out by *problem*, not by seed: only the evaluation partition.
 
         Seed separation is not enough -- the task space is small enough that a long
@@ -289,13 +328,15 @@ class LotusTrainer:
         memorised. :mod:`lamb.holdout` partitions by a hash of the problem itself,
         which training rejects, so overlap is zero however long training runs.
         """
-        rng = random.Random(self.cfg.seed * 7 + 12345)
+        rng = random.Random(self.cfg.seed * 7 + 12345 + 101 * (digits or 0))
+        desc = (self.descriptor if digits is None
+                else Descriptor(self.cfg.depth, digits, self.cfg.ops_key))
         out: List[Task] = []
         seen = set()
         for _ in range(400 * max(1, n)):          # bounded: small spaces may exhaust
             if len(out) >= n:
                 break
-            t = self.grammar.sample_with_trace(self.descriptor, rng.randint(0, 2 ** 31 - 1))
+            t = self.grammar.sample_with_trace(desc, rng.randint(0, 2 ** 31 - 1))
             if is_heldout(t[0]) and t[0] not in seen:
                 seen.add(t[0])
                 out.append(t)
@@ -322,6 +363,87 @@ class LotusTrainer:
                 tr_ids[i, :len(toks)] = torch.tensor(toks, device=self.device)
                 tr_mask[i, :len(toks)] = 1.0
         return prompt, aids, aab, apad, targets, tmask, tr_ids, tr_mask
+
+    def _alu_batch(self, tasks: List[Task]):
+        """Residue targets per latent slot, plus each row's parsed tree.
+
+        Slot ``i`` carries the ``i``-th post-order sub-result and the last slot the
+        answer, so a slot holds one *value* whatever its digit count. Rows whose
+        answer or trace leaves the representable ring are masked rather than
+        clipped -- a wrapped value is not a small error in a residue system, it is a
+        different number, and training on one teaches arithmetic that is wrong.
+        """
+        alu = self.reasoner.alu
+        L, b = self.cfg.n_latent, len(tasks)
+        tgt = torch.zeros((b, L, len(alu.sys.moduli)), dtype=torch.long, device=self.device)
+        mask = torch.zeros((b, L), dtype=torch.float32, device=self.device)
+        trees, keep = [], []
+        for i, (expr, ans, trace) in enumerate(tasks):
+            vals = list(trace) + [int(ans)]
+            if not all(alu.sys.representable(v) for v in vals):
+                trees.append(parse_expr(expr))
+                keep.append(False)
+                continue
+            slots = list(range(len(trace))) + [self.root_slot]
+            t = alu.sys.targets(vals, device=self.device)          # (len(vals), K)
+            for j, sl in enumerate(slots):
+                tgt[i, sl] = t[j]
+                mask[i, sl] = 1.0
+            trees.append(parse_expr(expr))
+            keep.append(True)
+        return tgt, mask, trees, torch.tensor(keep, device=self.device)
+
+    @torch.no_grad()
+    def algebraic_accuracy(self, n_tasks: Optional[int] = None,
+                           digits: Optional[int] = None) -> Dict[str, float]:
+        """Two answers from one model: the network's readout and the algebra's.
+
+        The readout is the ordinary decoded answer. The algebraic one is composed
+        from the **leaf** slots by exact arithmetic, so it never runs a decoder at
+        all -- one forward pass, no sampling, no EOS. Reporting both on the same
+        weights is the only honest way to ask whether the algebra is doing work.
+        ``residue_acc`` is the diagnostic that actually matters: CRT has no
+        locality, so one wrong residue is a wildly wrong answer, and end-to-end
+        accuracy is roughly the per-residue accuracy raised to the number of
+        residues the problem needs.
+        """
+        self.reasoner.eval()
+        tasks = self._eval_set(n_tasks or self.cfg.eval_tasks, digits)
+        alu = self.reasoner.alu
+        prompt, aids, aab, apad, *_ = self._collate(tasks)
+        tgt, mask, trees, keep = self._alu_batch(tasks)
+        m = self.reasoner.model
+        x_prompt = m.embed(prompt["input_ids"], prompt["abacus_ids"],
+                           prompt["value"], prompt["value_mask"])
+        _, _, latent_h, _ = self.reasoner.latent_block(x_prompt, prompt["pad_mask"])
+        codes = alu.codes(latent_h)
+        composed = alu.compose_tree(codes, trees)
+        got = [alu.sys.crt([int(bl.argmax(-1)) for bl in blocks]) for blocks in composed]
+        readout = self.reasoner.solve([e for e, _, _ in tasks], self.tok, self.max_ans,
+                                      device=self.device)
+        n_ok = sum(1 for (_, a, _), g, k in zip(tasks, got, keep.tolist())
+                   if k and g == int(a))
+        r_ok = sum(self.verifier.check(e, r) for (e, _, _), r in zip(tasks, readout))
+        # Per-modulus accuracy, split by slot role. Averaging the two hides the
+        # result: the algebra composes from *leaves*, so leaf accuracy is what
+        # predicts the answer (roughly leaf_acc ** (n_moduli * n_leaves)), while the
+        # root slot is only ever needed for the consistency check. The model has no
+        # reason to learn the root -- composition is not its job any more -- so the
+        # two numbers come apart hard, and the average is a number about nothing.
+        blocks = alu.sys.split(codes)
+        leaf_mask = mask.clone()
+        leaf_mask[:, self.root_slot] = 0.0
+        root_mask = torch.zeros_like(mask)
+        root_mask[:, self.root_slot] = mask[:, self.root_slot]
+        leaf, root = [], []
+        for k_i, blk in enumerate(blocks):
+            hit = (blk.argmax(-1) == tgt[..., k_i]).float()
+            leaf.append(float((hit * leaf_mask).sum() / leaf_mask.sum().clamp_min(1.0)))
+            root.append(float((hit * root_mask).sum() / root_mask.sum().clamp_min(1.0)))
+        return {"algebraic": n_ok / len(tasks), "readout": r_ok / len(tasks),
+                "leaf_residue": sum(leaf) / len(leaf), "leaf_residue_min": min(leaf),
+                "root_residue": sum(root) / len(root),
+                "in_range": float(keep.float().mean())}
 
     # -- space supervision ------------------------------------------------
     def _space_loss(self, latent_h: torch.Tensor, tr_ids: torch.Tensor,
@@ -437,19 +559,37 @@ class LotusTrainer:
             # Space supervision: arrange the latent manifold, do not just decode it.
             sp_loss = (self._space_loss(aux["latent_h"], tr_ids, tr_mask)
                        if c.space_coef > 0 else torch.zeros((), device=ans_logits.device))
+            # The latent ALU: one value per slot, coded in residues. The answer is
+            # composed from the leaves by exact arithmetic instead of predicted, so
+            # nothing about composition has to generalise -- it is not learned.
+            if c.alu_coef > 0:
+                codes = self.reasoner.alu.codes(aux["latent_h"])
+                tgt, amask, trees, _ = self._alu_batch(tasks)
+                alu_loss = self.reasoner.alu.code_loss(codes, tgt, amask)
+                # The label-free agreement term is available but OFF by default.
+                # Both the stated answer and the composed one are functions of the
+                # same latent block, so training on their agreement invites the
+                # model to satisfy it by routing rather than by being right. It is
+                # worth more as a *measurement* than as a loss until measured.
+                if c.alu_consistency_coef > 0:
+                    alu_loss = alu_loss + c.alu_consistency_coef * self.reasoner.alu.consistency(
+                        codes, trees, self.root_slot).mean()
+            else:
+                alu_loss = torch.zeros((), device=ans_logits.device)
             loss = (ans_loss + c.trace_coef * tr_loss + c.switch_coef * sw_loss
-                    + c.space_coef * sp_loss)
+                    + c.space_coef * sp_loss + c.alu_coef * alu_loss)
         self.amp.backward_step(loss, self.opt, self.reasoner.parameters(), c.grad_clip)
         return {"loss": float(loss.detach()), "ans": float(ans_loss.detach()),
                 "trace": float(tr_loss.detach()), "switch": float(sw_loss.detach()),
-                "space": float(sp_loss.detach())}
+                "space": float(sp_loss.detach()), "alu": float(alu_loss.detach())}
 
     # -- evaluation -------------------------------------------------------
     @torch.no_grad()
-    def accuracy(self, n_tasks: Optional[int] = None) -> float:
+    def accuracy(self, n_tasks: Optional[int] = None,
+                 digits: Optional[int] = None) -> float:
         """Exact-match accuracy, decoding only the answer (latents stay latent)."""
         n = n_tasks or self.cfg.eval_tasks
-        tasks = self._eval_set(n)
+        tasks = self._eval_set(n, digits)
         ans = self.reasoner.solve([e for e, _, _ in tasks], self.tok, self.max_ans,
                                   device=self.device)
         return sum(self.verifier.check(e, a) for (e, _, _), a in zip(tasks, ans)) / n

@@ -93,7 +93,7 @@ ARMS = ("coconut", "coconut-long", "lotus-answer", "lotus-trace")
 # Opt-in arms, not run by default -- they cost a full sweep each and neither has
 # been shown to do anything yet. ``lotus-space`` adds the supervised-contrastive
 # term over the latent manifold (arXiv:2606.20075's second supervision dimension).
-EXTRA_ARMS = ("lotus-space",)
+EXTRA_ARMS = ("lotus-space", "lotus-alu")
 ALL_ARMS = ARMS + EXTRA_ARMS
 
 
@@ -139,13 +139,29 @@ def _run_one(job: Tuple[str, str, int, int, int, int]) -> Dict[str, object]:
         cfg = LotusConfig(steps=steps, batch_size=batch_size, seed=seed,
                           depth=spec.depth, digits=spec.digits, ops_key=spec.ops_key,
                           n_latent=spec.n_latent, loops=3,
-                          trace_coef=0.0 if arm == "lotus-answer" else LotusConfig.trace_coef,
+                          trace_coef=(0.0 if arm in ("lotus-answer", "lotus-alu")
+                                      else LotusConfig.trace_coef),
                           space_coef=0.3 if arm == "lotus-space" else 0.0,
+                          alu_coef=1.0 if arm == "lotus-alu" else 0.0,
+                          alu_consistency_coef=0.0,
                           use_boundaries=False, switch_coef=0.0, device="cpu")
         tr = LotusTrainer(cfg, tok, mcfg)
         for s in range(steps):
             tr._train_step(s)
-        out["acc"] = tr.accuracy(512)
+        if arm == "lotus-alu":
+            # The ALU's answer is composed by the algebra, not decoded, so its
+            # accuracy is the composed one. The readout is kept beside it because
+            # this arm does not train its decoder, and reporting the readout as
+            # "the ALU's accuracy" would understate it as badly as reporting the
+            # composed number for the other arms would overstate them.
+            r = tr.algebraic_accuracy(512)
+            out["acc"] = r["algebraic"]
+            out["acc_readout"] = r["readout"]
+            out["leaf_residue"] = r["leaf_residue"]
+            out["root_residue"] = r["root_residue"]
+            out["in_range"] = r["in_range"]
+        else:
+            out["acc"] = tr.accuracy(512)
         out["trace_probe"] = tr.trace_probe(256)
         out["collapse"] = tr.collapse_metric(256)
         # Fraction of gold traces that did not fit the latent block. Non-zero means
@@ -255,8 +271,8 @@ def summarise(rows: List[Dict[str, object]]) -> Dict[str, object]:
                  # the confound controls: same wall clock, not just same step count
                  ("coconut-long", "coconut"), ("lotus-answer", "coconut-long"),
                  ("lotus-trace", "coconut-long"),
-                 # the untested second supervision dimension
-                 ("lotus-space", "lotus-trace")):
+                 # the untested second supervision dimension, and the ALU
+                 ("lotus-space", "lotus-trace"), ("lotus-alu", "lotus-trace")):
         shared = sorted(set(by_arm[a]) & set(by_arm[b]))
         if len(shared) < 2:
             continue
