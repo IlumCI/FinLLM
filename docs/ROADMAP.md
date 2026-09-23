@@ -623,6 +623,49 @@ on the reconstruction. That is the label-free correctness signal the project nee
 order to survive leaving the distribution its verifier was written for.
 
 
+### 3a-vii. The program can be induced from the answer alone
+
+The register machine (`lamb/regmachine.py`) turns the latents into registers and has
+the model emit a *program* over them — an operation and two pointers per step — which
+the residue algebra executes. Registers are append-only, so the dataflow is a DAG and
+a pointer mask makes reading an unwritten register unrepresentable rather than merely
+penalised.
+
+The question that mattered, pre-registered before running: **is the differentiable
+executor a capability or a convenience?** PAL and Program-of-Thought call an external
+Python interpreter, so a wrong answer cannot tell a pointer which way to move and the
+program can only be imitated or reinforced — and RL on this latent block was measured
+inert (3a-ii). Here the executor is exact algebra and differentiable, so the answer
+loss reaches the pointer heads *through the arithmetic*. Two arms, depth 2:
+
+| arm | `program_coef` | answer acc | canonical acc |
+| --- | --- | --- | --- |
+| supervised | 1.0 | 1.000 | 1.000 |
+| **answer-only** | **0.0** | **1.000** | **0.000** |
+
+With the gold program removed entirely, the model reaches **perfect held-out answer
+accuracy** while matching the generator's program on *zero* instructions. That is not
+a contradiction, and the diagnostic that looked like a failure is the one that
+explains it: **the program computing a function is not unique.** Exhaustively, 48
+distinct three-instruction programs compute `(a+b)+(c+d)` exactly — commutativity and
+re-association — of which the grammar emits one. A model inducing any of the other 47
+scores 0.000 against the canonical form while being completely correct.
+
+So `canonical_acc` measures *conformity to the generator's form*, and `answer_acc` is
+the correctness measure. Held-out answer accuracy of 1.000 with a non-canonical
+program is the strong version of the result: the program generalises, so it is
+computing the right function rather than memorising a mapping.
+
+**Gradients through exact arithmetic are sufficient to induce a correct program from
+outcomes alone.** That is the one thing in this design that a non-differentiable
+executor cannot do, and it is the mechanism the language bridge depends on — a word
+problem does not come with a gold program either.
+
+Caveats, since the arms are n=1 at the smallest depth: three instructions over four
+operands is a small program space, `op_acc` at 0.603 says the answer-only arm's
+operator choices are partly canonical and partly not, and depth 3+ has not been run.
+The claim established is that outcome-only induction *works here*, not that it scales.
+
 ## 3b. Latent inter-agent communication (Coconut) — Stage B implemented
 
 Implemented in `lamb/comm.py` (`python -m lamb.comm`). The message passed between

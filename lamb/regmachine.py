@@ -100,43 +100,65 @@ class RegisterFile:
     """
 
     def __init__(self, sysm: ResidueSystem, values: Sequence[Sequence[int]],
-                 device: str = "cpu", sharp: float = 30.0):
+                 device: str = "cpu", sharp: float = 30.0,
+                 alg: "Optional[ResidueAlgebra]" = None):
         self.sys = sysm
+        self.alg = alg or ResidueAlgebra(sysm, device=device)
         b, n = len(values), len(values[0])
-        self.blocks = [torch.full((b, n, p), -sharp, device=device) for p in sysm.moduli]
+        P = max(sysm.moduli)
+        # Registers are held **packed** as (B, R, K, P), one row per modulus padded
+        # to the widest. The per-modulus list is the obvious representation and the
+        # wrong one on a GPU: it turns every read and every composition into one
+        # tiny kernel per modulus, and the arithmetic in a composition is ~0.001 us
+        # against a 5-10 us launch. Packing pays ~70% wasted arithmetic and about
+        # 5x the intermediate memory -- 10 MB rather than 2 at batch 256, nothing on
+        # any real card -- to cut the kernel count by 7-9x along the hot path.
+        self.packed = torch.full((b, n, len(sysm.moduli), P), -sharp, device=device)
         for i, row in enumerate(values):
             for j, v in enumerate(row):
                 for k, p in enumerate(sysm.moduli):
-                    self.blocks[k][i, j, int(v) % p] = sharp
-        self.blocks = [torch.softmax(x, dim=-1) for x in self.blocks]
+                    self.packed[i, j, k, int(v) % p] = sharp
+        self.packed = torch.softmax(self.packed, dim=-1) * self._valid(device)
 
-    def append(self, new: Sequence[torch.Tensor]) -> None:
-        self.blocks = [torch.cat([b, n.unsqueeze(1)], dim=1)
-                       for b, n in zip(self.blocks, new)]
+    def _valid(self, device) -> torch.Tensor:
+        return self.alg._tables(torch.device(device))[3]        # (K, P) padding mask
 
-    def read(self, ptr: torch.Tensor) -> List[torch.Tensor]:
-        """A pointer-weighted mixture over registers. ``ptr`` is ``(B, R)``."""
-        return [torch.einsum("br,brp->bp", ptr, blk) for blk in self.blocks]
+    @property
+    def blocks(self) -> List[torch.Tensor]:
+        """The per-modulus view, for callers that want it. Narrowing is free."""
+        return [self.packed[..., k, :p] for k, p in enumerate(self.sys.moduli)]
+
+    def append(self, new: torch.Tensor) -> None:
+        """``new`` is packed ``(B, K, P)``."""
+        self.packed = torch.cat([self.packed, new.unsqueeze(1)], dim=1)
+
+    def read(self, ptr: torch.Tensor) -> torch.Tensor:
+        """Pointer-weighted mixture over registers. ``ptr`` ``(B, R)`` -> ``(B, K, P)``."""
+        return torch.einsum("br,brkp->bkp", ptr, self.packed)
 
     def decode(self, index: int) -> List[int]:
-        return [self.sys.crt([int(blk[i, index].argmax(-1)) for blk in self.blocks])
-                for i in range(self.blocks[0].size(0))]
+        picks = self.packed[:, index].argmax(-1)                 # (B, K)
+        return [self.sys.crt([int(picks[i, k]) % p
+                              for k, p in enumerate(self.sys.moduli)])
+                for i in range(picks.size(0))]
 
 
 def execute(alg: ResidueAlgebra, regs: RegisterFile, op_w: torch.Tensor,
-            ptr_a: torch.Tensor, ptr_b: torch.Tensor) -> List[torch.Tensor]:
+            ptr_a: torch.Tensor, ptr_b: torch.Tensor) -> torch.Tensor:
     """One instruction. ``op_w`` ``(B, n_ops)``; pointers ``(B, R)``, all normalised.
 
-    The operation is a mixture over the three composed results rather than a choice
-    between them, so an undecided model still produces a well-formed value and the
-    gradient can tell it which way to move.
+    Returns the packed ``(B, K, P)`` result. The operation is a mixture over the
+    three composed results rather than a choice between them, so an undecided model
+    still produces a well-formed value and the gradient can tell it which way to
+    move. All three compositions run batched over moduli, so an instruction costs
+    three kernels' worth of algebra rather than three times seven.
     """
     a, b = regs.read(ptr_a), regs.read(ptr_b)
-    out: Optional[List[torch.Tensor]] = None
+    out: Optional[torch.Tensor] = None
     for oi, op in enumerate(OPS):
-        comp = alg.compose_blocks(a, b, op)
-        w = op_w[:, oi].unsqueeze(-1)
-        out = [w * c for c in comp] if out is None else [o + w * c for o, c in zip(out, comp)]
+        comp = alg.compose_packed(a, b, op)
+        w = op_w[:, oi].view(-1, 1, 1)
+        out = w * comp if out is None else out + w * comp
     return out
 
 
@@ -345,9 +367,23 @@ class RegMachineTrainer:
 
     @torch.no_grad()
     def evaluate(self, n_tasks: int = 256):
-        """Answer accuracy, and -- the diagnostic that explains it -- how much of the
-        *program* is right. A correct answer from a wrong program is luck, and a
-        wrong answer from a right program means the operands or the range failed."""
+        """Answer accuracy, plus how far the emitted program matches the generator's.
+
+        **``answer_acc`` is the correctness measure; the program metrics are not.**
+        The program that computes a function is not unique -- 48 distinct
+        three-instruction programs compute ``(a+b)+(c+d)`` exactly, of which the
+        grammar emits one -- so ``canonical_acc`` measures *conformity to the
+        generator's form*, not competence. A model that induces one of the other 47
+        scores zero on it while being perfectly correct, which is exactly what the
+        answer-only arm does.
+
+        Both are reported because the pair is diagnostic in the direction that still
+        matters: a wrong answer from a canonical program means the operands or the
+        ring failed rather than the reasoning, and high canonical agreement with a
+        wrong answer would mean the executor is broken. It is only the reverse
+        inference -- low canonical agreement implying a wrong program -- that does
+        not hold.
+        """
         self.inner.reasoner.eval()
         self.machine.eval()
         tasks = self.inner._eval_set(n_tasks)
@@ -363,8 +399,9 @@ class RegMachineTrainer:
         ok_a = (a_l.argmax(-1) == ra).float()
         ok_b = (b_l.argmax(-1) == rb).float()
         whole = (ok_op * ok_a * ok_b)
-        return {"answer_acc": acc,
-                "instr_acc": float(whole.mean()),
-                "program_acc": float(whole.min(dim=1).values.mean()),
+        return {"answer_acc": acc,                       # the correctness measure
+                "instr_acc": float(whole.mean()),         # per-instruction conformity
+                "canonical_acc": float(whole.min(dim=1).values.mean()),
+                "program_acc": float(whole.min(dim=1).values.mean()),  # kept: old name
                 "op_acc": float(ok_op.mean()), "ptr_acc": float((ok_a * ok_b).mean()),
                 "program_loss": float(prog), "answer_loss": float(ans)}
