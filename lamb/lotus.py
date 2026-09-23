@@ -39,7 +39,7 @@ from typing import Dict, List, Optional, Tuple
 import torch
 import torch.nn as nn
 
-from .alu import LatentALU, parse_expr, slot_order
+from .alu import LatentALU, ScalarALU, parse_expr, slot_order
 from .algebra import ResidueSystem
 from .coconut import _masked_ce, coconut_collate
 from .comm import _decode_answer
@@ -77,7 +77,8 @@ class LotusReasoner(nn.Module):
     def __init__(self, model: LAMb, n_latent: int, loops: int,
                  bot_id: Optional[int] = None, eot_id: Optional[int] = None,
                  trace_compress: int = 1, space_dim: int = 0,
-                 alu_moduli: Optional[Tuple[int, ...]] = None):
+                 alu_moduli: Optional[Tuple[int, ...]] = None,
+                 alu_mode: str = "residue"):
         super().__init__()
         self.model = model
         self.n_latent = int(n_latent)
@@ -132,8 +133,12 @@ class LotusReasoner(nn.Module):
                            if space_dim > 0 else None)
         # The latent ALU (:mod:`lamb.alu`). Built only when asked for, so the
         # parameter count is untouched when it is off.
-        self.alu = (LatentALU(d, ResidueSystem(tuple(alu_moduli)))
-                    if alu_moduli else None)
+        if alu_moduli is None:
+            self.alu = None
+        elif alu_mode == "scalar":
+            self.alu = ScalarALU(d)
+        else:
+            self.alu = LatentALU(d, ResidueSystem(tuple(alu_moduli)))
 
     def _marker(self, token_id: int, b: int, device) -> torch.Tensor:
         """Embed a boundary token as an ordinary token (B, 1, d)."""
@@ -270,7 +275,8 @@ class LotusTrainer:
         self.reasoner = LotusReasoner(
             model, cfg.n_latent, cfg.loops, bot, eot, cfg.trace_compress,
             cfg.space_dim if cfg.space_coef > 0 else 0,
-            tuple(cfg.alu_moduli) if cfg.alu_coef > 0 else None).to(self.device)
+            tuple(cfg.alu_moduli) if cfg.alu_coef > 0 else None,
+            cfg.alu_mode).to(self.device)
         # ALU slot layout: slots 0..T-1 hold the T = 2^depth - 2 intermediates in
         # the grammar's post-order; the root goes in the **last** slot. One slot per
         # *value*, so the budget tracks reasoning steps rather than digits --
@@ -374,24 +380,32 @@ class LotusTrainer:
         different number, and training on one teaches arithmetic that is wrong.
         """
         alu = self.reasoner.alu
+        scalar = isinstance(alu, ScalarALU)
+        K = 1 if scalar else len(alu.sys.moduli)
         L, b = self.cfg.n_latent, len(tasks)
-        tgt = torch.zeros((b, L, len(alu.sys.moduli)), dtype=torch.long, device=self.device)
+        tgt = torch.zeros((b, L, K), dtype=torch.long, device=self.device)
+        raw = torch.zeros((b, L), dtype=torch.float32, device=self.device)
         mask = torch.zeros((b, L), dtype=torch.float32, device=self.device)
         trees, keep = [], []
         for i, (expr, ans, trace) in enumerate(tasks):
             vals = list(trace) + [int(ans)]
-            if not all(alu.sys.representable(v) for v in vals):
+            # A scalar has no ring to leave, so only the residue arm can go
+            # out of range -- and there a wrapped value is a *different number*,
+            # not a big one, so those rows are masked rather than clipped.
+            if not scalar and not all(alu.sys.representable(v) for v in vals):
                 trees.append(parse_expr(expr))
                 keep.append(False)
                 continue
             slots = list(range(len(trace))) + [self.root_slot]
-            t = alu.sys.targets(vals, device=self.device)          # (len(vals), K)
+            t = None if scalar else alu.sys.targets(vals, device=self.device)
             for j, sl in enumerate(slots):
-                tgt[i, sl] = t[j]
+                if t is not None:
+                    tgt[i, sl] = t[j]
+                raw[i, sl] = float(vals[j])
                 mask[i, sl] = 1.0
             trees.append(parse_expr(expr))
             keep.append(True)
-        return tgt, mask, trees, torch.tensor(keep, device=self.device)
+        return tgt, mask, trees, torch.tensor(keep, device=self.device), raw
 
     @torch.no_grad()
     def algebraic_accuracy(self, n_tasks: Optional[int] = None,
@@ -411,16 +425,29 @@ class LotusTrainer:
         tasks = self._eval_set(n_tasks or self.cfg.eval_tasks, digits)
         alu = self.reasoner.alu
         prompt, aids, aab, apad, *_ = self._collate(tasks)
-        tgt, mask, trees, keep = self._alu_batch(tasks)
+        tgt, mask, trees, keep, raw = self._alu_batch(tasks)
         m = self.reasoner.model
         x_prompt = m.embed(prompt["input_ids"], prompt["abacus_ids"],
                            prompt["value"], prompt["value_mask"])
         _, _, latent_h, _ = self.reasoner.latent_block(x_prompt, prompt["pad_mask"])
+        readout = self.reasoner.solve([e for e, _, _ in tasks], self.tok, self.max_ans,
+                                      device=self.device)
+        if isinstance(alu, ScalarALU):
+            # The control: compose the regressed values by ordinary arithmetic and
+            # round. Nothing quantises on the way, so an error anywhere in the tree
+            # arrives at the answer intact.
+            vals = alu.values(latent_h)
+            got = [int(round(float(v))) for v in alu.compose_tree(vals, trees)]
+            n_ok = sum(1 for (_, a, _), g in zip(tasks, got) if g == int(a))
+            err = ((vals - raw).abs() * mask).sum() / mask.sum().clamp_min(1.0)
+            r_ok = sum(self.verifier.check(e, r) for (e, _, _), r in zip(tasks, readout))
+            return {"algebraic": n_ok / len(tasks), "readout": r_ok / len(tasks),
+                    "leaf_residue": float("nan"), "leaf_residue_min": float("nan"),
+                    "root_residue": float("nan"), "leaf_by_modulus": {},
+                    "mean_abs_value_error": float(err), "in_range": 1.0}
         codes = alu.codes(latent_h)
         composed = alu.compose_tree(codes, trees)
         got = [alu.sys.crt([int(bl.argmax(-1)) for bl in blocks]) for blocks in composed]
-        readout = self.reasoner.solve([e for e, _, _ in tasks], self.tok, self.max_ans,
-                                      device=self.device)
         n_ok = sum(1 for (_, a, _), g, k in zip(tasks, got, keep.tolist())
                    if k and g == int(a))
         r_ok = sum(self.verifier.check(e, r) for (e, _, _), r in zip(tasks, readout))
@@ -440,9 +467,17 @@ class LotusTrainer:
             hit = (blk.argmax(-1) == tgt[..., k_i]).float()
             leaf.append(float((hit * leaf_mask).sum() / leaf_mask.sum().clamp_min(1.0)))
             root.append(float((hit * root_mask).sum() / root_mask.sum().clamp_min(1.0)))
+        # Per-modulus, not just the mean. At an untrained operand width there are
+        # two quite different failure modes and only this separates them: if the
+        # leaf residues hold up and the answer still fails, the problem is range or
+        # composition; if they collapse, the encoder cannot read the wider number at
+        # all, or that modulus needed digit positions the training widths never
+        # showed it. The per-modulus profile names which.
+        by_mod = {p_: round(v, 4) for p_, v in zip(alu.sys.moduli, leaf)}
         return {"algebraic": n_ok / len(tasks), "readout": r_ok / len(tasks),
                 "leaf_residue": sum(leaf) / len(leaf), "leaf_residue_min": min(leaf),
                 "root_residue": sum(root) / len(root),
+                "leaf_by_modulus": by_mod,
                 "in_range": float(keep.float().mean())}
 
     # -- space supervision ------------------------------------------------
@@ -563,15 +598,20 @@ class LotusTrainer:
             # composed from the leaves by exact arithmetic instead of predicted, so
             # nothing about composition has to generalise -- it is not learned.
             if c.alu_coef > 0:
-                codes = self.reasoner.alu.codes(aux["latent_h"])
-                tgt, amask, trees, _ = self._alu_batch(tasks)
-                alu_loss = self.reasoner.alu.code_loss(codes, tgt, amask)
+                tgt, amask, trees, _, raw = self._alu_batch(tasks)
+                if isinstance(self.reasoner.alu, ScalarALU):
+                    vals = self.reasoner.alu.values(aux["latent_h"])
+                    alu_loss = self.reasoner.alu.value_loss(vals, raw, amask)
+                    codes = None
+                else:
+                    codes = self.reasoner.alu.codes(aux["latent_h"])
+                    alu_loss = self.reasoner.alu.code_loss(codes, tgt, amask)
                 # The label-free agreement term is available but OFF by default.
                 # Both the stated answer and the composed one are functions of the
                 # same latent block, so training on their agreement invites the
                 # model to satisfy it by routing rather than by being right. It is
                 # worth more as a *measurement* than as a loss until measured.
-                if c.alu_consistency_coef > 0:
+                if c.alu_consistency_coef > 0 and codes is not None:
                     alu_loss = alu_loss + c.alu_consistency_coef * self.reasoner.alu.consistency(
                         codes, trees, self.root_slot).mean()
             else:

@@ -126,6 +126,54 @@ def _slot_of(pairs: List[Tuple[Tree, int]], node: Tree) -> int:
     raise KeyError("sub-tree has no slot")
 
 
+class ScalarALU(nn.Module):
+    """The control: one *scalar* per latent, composed by ordinary arithmetic.
+
+    The obvious objection to a residue system is that it is unnecessary -- a latent
+    could simply regress its value, and ``a + b`` is exact on scalars too, with no
+    moduli, no CRT and no brittleness to a single wrong residue.
+
+    The counter-argument is that regression over unbounded integers is badly
+    conditioned where classification over a small ring is not: a scalar has to hit
+    ``47.0`` rather than pick one of eleven classes, the error does not quantise, and
+    multiplication squares whatever error survives. But that is an argument, and this
+    is the arm that turns it into a measurement. It is deliberately the *naive*
+    version a reviewer would propose -- fixed scale, Huber loss, round at the end --
+    because a naive version that wins would mean the residue machinery is not
+    earning its place.
+    """
+
+    def __init__(self, d_model: int, scale: float = 1.0e4):
+        super().__init__()
+        self.scale = scale
+        self.head = nn.Linear(d_model, 1)
+        nn.init.zeros_(self.head.bias)
+
+    def values(self, latent_h: torch.Tensor) -> torch.Tensor:
+        """``(B, L, d) -> (B, L)`` predicted values, in units of ``scale``."""
+        return self.head(latent_h).squeeze(-1) * self.scale
+
+    def _from_leaves(self, row: torch.Tensor, t: Tree,
+                     pairs: List[Tuple[Tree, int]]) -> torch.Tensor:
+        if is_leaf(t):
+            return row[_slot_of(pairs, t)]
+        op, l, r = t
+        a = self._from_leaves(row, l, pairs)
+        b = self._from_leaves(row, r, pairs)
+        return {"+": a + b, "-": a - b, "*": a * b}[op]
+
+    def compose_tree(self, vals: torch.Tensor, trees: Sequence[Tree]) -> torch.Tensor:
+        return torch.stack([self._from_leaves(vals[b], t, slot_pairs(t))
+                            for b, t in enumerate(trees)])
+
+    def value_loss(self, vals: torch.Tensor, targets: torch.Tensor,
+                   mask: torch.Tensor) -> torch.Tensor:
+        """Huber on the scaled value -- the standard choice for a regression head."""
+        err = torch.nn.functional.huber_loss(
+            vals / self.scale, targets / self.scale, reduction="none")
+        return (err * mask).sum() / mask.sum().clamp_min(1.0)
+
+
 @dataclass
 class AluConfig:
     moduli: Tuple[int, ...] = (7, 11, 13, 17, 19, 23)

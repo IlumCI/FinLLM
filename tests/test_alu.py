@@ -140,6 +140,29 @@ def test_evaluation_reports_both_answers_and_splits_the_diagnostic():
 def test_out_of_range_rows_are_masked_not_clipped():
     tr = _trainer(depth=2, digits=6, n_latent=8, alu_moduli=(5, 7))   # tiny ring
     tasks = tr._sample_batch(24)
-    _, mask, _, keep = tr._alu_batch(tasks)
+    _, mask, _, keep, _raw = tr._alu_batch(tasks)
     assert float(keep.float().mean()) < 1.0       # some rows leave the ring
     assert float(mask[~keep].sum()) == 0.0        # and are supervised on nothing
+
+
+def test_scalar_control_composes_and_trains():
+    """The control for "why not just regress the value?".
+
+    It has to actually work as a baseline, or the comparison is rigged: exact
+    composition from oracle scalars, and a loss that falls.
+    """
+    from lamb.alu import ScalarALU
+
+    m = ScalarALU(d_model=8)
+    t = parse_expr("(6+6)-(4-8)")
+    vals = torch.tensor([[12.0, -4.0, 0.0, 0.0]])
+    assert float(m.compose_tree(vals, [t])[0]) == 16.0
+
+    tr = _trainer(steps=20, batch_size=32, alu_mode="scalar")
+    first = tr._train_step(0)
+    last = first
+    for s in range(1, 20):
+        last = tr._train_step(s)
+    assert last["alu"] < first["alu"]
+    r = tr.algebraic_accuracy(32)
+    assert "mean_abs_value_error" in r      # the scalar arm's own diagnostic

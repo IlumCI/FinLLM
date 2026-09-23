@@ -274,6 +274,11 @@ class LotusConfig:
     # label-free agreement between the model's stated answer and the composed one --
     # the term that is defined on problems with no known answer.
     alu_coef: float = 0.0
+    # "residue" is the latent ALU; "scalar" is its control -- one regressed
+    # value per latent, composed by ordinary arithmetic. The control exists
+    # because "why not just regress the number?" is the first objection to a
+    # residue system, and it deserves a measurement rather than an argument.
+    alu_mode: str = "residue"
     alu_consistency_coef: float = 0.1
     # Short multiplicative order of 10 (see lamb.algebra.DEFAULT_MODULI): the
     # digit-coefficient pattern repeats every ord_p(10) positions, so a long
