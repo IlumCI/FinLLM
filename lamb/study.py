@@ -349,6 +349,17 @@ def run_study(task_key: str, seeds: int = 5, steps: int = 1000, batch_size: int 
     needed is not known until the first few runs reveal the spread.
     """
     spec = TASKS[task_key]
+    # One CUDA context per worker process, ~300-500 MB each before a single
+    # parameter is allocated. Four workers is the right answer on four CPU cores
+    # and a guaranteed out-of-memory on a 4 GB card, so the parallelism that helps
+    # on CPU is exactly what breaks on a small GPU. Clamp rather than fail: the
+    # runs are the point, the concurrency is not.
+    from .device import resolve_device
+
+    if workers > 1 and resolve_device("auto").startswith("cuda"):
+        print(f"[study] CUDA detected: forcing workers {workers} -> 1 "
+              f"(one CUDA context per worker would exhaust a small card)", flush=True)
+        workers = 1
     if merge and not os.path.exists(merge):
         # Validate before spending the compute, not after. Discovering a bad path
         # in the summary step throws away every run that preceded it.
