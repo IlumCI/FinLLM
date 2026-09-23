@@ -1,230 +1,248 @@
 # LAMb — Latent Arithmetic Machine
 
-LAMb is a **number-native, depth-recurrent, latent-reasoning autoregressive
-model** that teaches itself arithmetic from zero external data. It is a research
-scaffold that combines four current frontier lines into one small, CPU-runnable
-system:
+A number-native reasoning model. LAMb has no language tokens: its vocabulary is
+digits and arithmetic operators, it reasons in continuous latent space, and it emits
+**programs** rather than prose. Arithmetic is not approximated by the network — it is
+performed exactly by a residue algebra the network writes instructions for.
 
-| Design goal | Mechanism in LAMb | Grounding |
-| --- | --- | --- |
-| **Reason in latent space** | A depth-recurrent core iterates a shared block `T` times (*vertical* latent thinking), feeding the hidden state back as its own next input. A **Coconut** scratchpad (`lamb/coconut.py`, Stage A) adds *horizontal* latent thinking: `K` continuous-thought positions between prompt and answer, each fed the model's own last hidden state. All reasoning is continuous; no intermediate tokens are decoded, and both `T` and `K` are knobs you turn up at inference. | Coconut (continuous thought, [2412.06769](https://arxiv.org/abs/2412.06769)); inference-time scaling for continuous reasoning ([2510.12167](https://arxiv.org/abs/2510.12167)); *Survey on Latent Reasoning* ([2507.06203](https://arxiv.org/html/2507.06203)) |
-| **Communicate in pure arithmetic** | No BPE. Numbers are digit tokens with **Abacus** intra-number positions (reset per number, LSB-first) plus a **value channel** so a digit also knows its number's magnitude. | Abacus embeddings; *Numbers Already Carry Their Own Embeddings* ([2606.14108](https://arxiv.org/html/2606.14108v1)); BitTokens |
-| **infContext** | A fixed-size **test-time neural memory** written during the forward pass by a surprise-gated delta rule (data-dependent forget/write gates). O(1) state, unbounded effective context. | Titans ([NeurIPS 2025](https://proceedings.neurips.cc/paper_files/paper/2025/file/a4ca07aa108036f80cbb5b82285fd4b1-Paper-Conference.pdf)); ATLAS ([2505.23735](https://arxiv.org/abs/2505.23735)); DeltaNet |
-| **Exploding self-improvement** | **Self-play**: a learning-progress bandit proposes tasks at the solver's frontier, an exact **Rust verifier** gives the reward, and the solver improves by expert iteration. Zero human data; the mastered difficulty frontier expands on its own. | Absolute Zero ([2505.03335](https://arxiv.org/pdf/2505.03335)); R-Zero; automatic curriculum learning |
+The design question behind it: **what if the parts of reasoning that can be exact
+were made exact, so the learned part only has to do the part that genuinely
+requires understanding?**
 
-The Python/PyTorch model is paired with a small **Rust extension** (`lamb_core`,
-via PyO3/maturin) that owns the three hottest / correctness-critical paths — the
-exact arithmetic verifier, the curriculum sampler, and a top-k memory store —
-with pure-Python fallbacks so everything runs even if the extension is not built.
+---
 
-> Status: v0.1 research scaffold. The point is a faithful, end-to-end, runnable
-> realization of the architecture on CPU, not a state-of-the-art solver.
+## Status
+
+This project keeps an explicit ledger of what survives scrutiny and what does not,
+because several headline claims have not. Full detail in `docs/ROADMAP.md`.
+
+**Established.**
+
+| result | evidence |
+| --- | --- |
+| Residue algebra is exact | `+ − × ÷` exact at every in-range magnitude; composition exact at **depth 6** (a 64-operand expression) with nothing learned |
+| Exact rationals | 0 errors over 1200 random operations against Python's `Fraction`, including division |
+| Single-error correction | **100%** of single-residue errors corrected, **0%** mis-corrected, over 4,000 trials |
+| Program induction from outcomes alone | **1.000** held-out answer accuracy with `program_coef=0` — no gold program anywhere |
+| Latent code becomes canonical | Stage B partner randomization: zero-shot **0.935** vs trained-pair 0.941, blank ~0.00, on a clean split |
+| Trace supervision | **+6.7** over a converged, compute-matched baseline, *p* = 0.040, positive on all 5 seeds |
+
+**Retracted.** The parallel latent block's "+32.3 structural advantage" (it is
+**−0.010 at *p* = 0.80** against a wall-clock-matched baseline); the claim that the
+restructure reduces variance (the baseline was simply undertrained); a "61 seeds"
+power figure computed from that same undertrained arm; SWITCH boundary tokens; the
+premise that on-policy RL moves the latent block; and "zero GSM8K→GSM1K contamination
+gap by construction", which does not survive a pretrained encoder.
+
+**The pattern worth noting: everything exact survived, and most things learned did
+not.** The one learned result that held is program induction — which works precisely
+because an exact executor carries the gradient.
+
+---
 
 ## Install
 
-### Environment
-
-`uv.lock` pins the exact dependency graph, torch included. Reproducing a number
-across machines needs that: torch changes kernel selection and reduction order
-between minor versions, and on a model this small those move accuracy rather than
-just low-order bits — a difference that would read as a finding. The lock is
-platform-portable (version pinned, no local build tag), so the same file serves CPU
-and CUDA boxes.
-
 ```bash
-uv sync                  # exact pinned environment
+uv sync                              # exact pinned environment
 uv run python -m lamb.lotus
 ```
 
-On Windows with a CUDA card, PyPI's `torch` wheel is CPU-only; add
-`--index-url https://download.pytorch.org/whl/cu124`. On Linux the default already
-includes CUDA.
+`uv.lock` pins the dependency graph, torch included, and is platform-portable
+(version pinned, no local build tag). That matters here: torch changes kernel
+selection and reduction order between minor versions, and on a model this small those
+move *accuracy*, not just low-order bits — a difference that would read as a finding.
+
+Plain pip works too:
 
 ```bash
-# 1. Python deps (CPU-only torch keeps it light)
-python -m pip install numpy
-python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
-python -m pip install -e .
-
-# 2. (optional but recommended) build the native kernels
-python -m pip install maturin
-cd rust && maturin build --release && \
-  python -m pip install --force-reinstall target/wheels/lamb_core-*.whl && cd ..
+pip install -e . && pip install pytest
 ```
 
-If step 2 is skipped, LAMb transparently uses the Python fallbacks
-(`lamb.backend()` reports `"python"` instead of `"rust"`).
+On **Windows with a CUDA card**, PyPI's `torch` wheel is CPU-only; add
+`--index-url https://download.pytorch.org/whl/cu124`. On Linux the default wheel
+already includes CUDA.
 
-## Run the self-play demo
+The Rust kernels are **optional** — there is an exact Python fallback, and
+`USING_RUST=False` changes speed, not results. They profile at ~1.5% of a training
+step, so they matter for self-play verifier throughput rather than for training:
 
 ```bash
-python -m lamb.train                     # ~4 min on 4 CPU cores (bandit + expert iteration)
-python -m lamb.train --steps 4000 --recurrent-steps 6   # pushes the frontier further
-python -m lamb.train --use-memory        # enable the test-time memory in the core
-python -m lamb.train --proposer grpo_hyper   # GRPO-trained hypernetwork proposer
-python -m lamb.train --solver grpo           # add a GRPO/RLVR term on the solver
-python -m lamb.train --red-queen             # Red Queen coevolution (league + novelty + relative fitness)
-python -m lamb.train --red-queen --open-ended --proposer factored_hyper   # open-ended grammar (Step 2)
-python -m lamb.poet                          # POET population of (env, agent) pairs (Step 3)
-python -m lamb.poet_shared                    # shared-backbone POET (DoRA adapters by default; --adapter-type lora|hidden)
-python -m lamb.memory_bench                   # long-context needle/passkey retrieval (infContext)
-python -m lamb.ruler_bench                     # RULER/BABILong-style suite (NIAH, multi-key, variable tracking)
-python -m lamb.coconut                         # Coconut continuous-thought reasoning + verifier best-of-N (Stage A)
-python -m lamb.lotus                           # Stage A restructured: parallel supervised latents (the scalable family)
-python -m lamb.lotus --trace-coef 0             # ablation: parallel latents, answer-only supervision
-python -m lamb.latent_rl                       # does on-policy RL move the latent block? (measured: no)
-python -m lamb.study --task d2g1               # paired multi-seed comparison of the Stage A arms, with error bars
-LAMB_DEVICE=cuda python -m lamb.lotus          # every entry point honours LAMB_DEVICE; see examples/LAMb_Colab.ipynb
-python -m lamb.study --task d2g2 --seeds 5      # ...on a space too large to memorise (5.2e8 expressions)
-python -m lamb.comm                            # latent inter-agent communication: message = a thought vector (Stage B)
-python -m lamb.comm --sweep                     # channel-bandwidth (capacity) sweep with DRU noise
-python -m lamb.comm_transfer                     # held-out-partner test: is the latent code private or shareable?
-python -m lamb.comm_pop                          # partner randomization: population -> canonical zero-shot code
+pip install maturin && (cd rust && maturin develop --release)
 ```
 
-You will watch, from zero data:
-
-- `frontier` — the mastered operand-digit sum — expand as the solver improves;
-- `H(prop)` — proposer entropy — stay healthy (the bandit never collapses) while
-  `top` cell shifts from easy to hard;
-- held-out exact-match accuracy climb (1-digit is mastered quickly; 2-digit
-  climbs steadily and mastered with more steps/latent-depth);
-- **test-time latent-step scaling**: accuracy is robust as `T` grows, because
-  the latent depth is randomised during training.
-
-## Scaling and hardware (GPU + CPU + RAM hybrid)
-
-LAMb is CPU-first but device-agnostic, so it scales to a GPU with no code change.
-`lamb/device.py` is the single place that picks the device and precision:
-
-- **Accelerator does the neural compute.** Every entry point takes `--device`
-  (`auto` picks `cuda` > `mps` > `cpu`; or set `LAMB_DEVICE`) and `--amp/--no-amp`.
-  Mixed precision turns on automatically on CUDA (bf16 on Ampere+, else fp16 with
-  a gradient scaler) and stays **off on CPU** so the CPU path never regresses.
-- **CPU runs the exact Rust kernels** (`lamb_core`: verifier, curriculum sampler,
-  top-k store) alongside the accelerator — cheap, native, correctness-critical.
-- **RAM holds the buffers** (replay buffers, held-out eval sets, the exact
-  retrieval tier); `--threads` gives the CPU legs every core.
+**Device.** Every entry point honours `LAMB_DEVICE`, which overrides the config
+without editing code:
 
 ```bash
-python -m lamb.train --device auto --scale small   # 2.0M params (256-wide)
-python -m lamb.train --device cuda --scale base --amp   # 7.9M params, bf16 on a GPU
-python -m lamb.coconut --device cuda --d-model 512      # Stage A on a GPU
+LAMB_DEVICE=cuda python -m lamb.lotus --amp
 ```
 
-Scale presets (`--scale`) grow width/depth/batch together:
+For GPUs, `examples/LAMb_Colab.ipynb` sets up, **verifies the CUDA path**, and runs the
+open experiments. Run its verification cell first: two bugs fixed here are unreachable
+on CPU, and the cell exists so a bad result is never mistaken for a bad idea.
 
-| preset | `d_model` | heads | recurrent steps | batch | params |
-| --- | --- | --- | --- | --- | --- |
-| `tiny` (default) | 96 | 4 | 4 | 64 | 0.28M |
-| `small` | 256 | 8 | 6 | 128 | 1.98M |
-| `base` | 512 | 8 | 8 | 256 | 7.90M |
-| `large` | 1024 | 16 | 12 | 512 | 31.5M |
+---
 
-> The GPU path is implemented and unit-tested on CPU (autocast, scaler, scaling
-> presets); it has not been exercised on a physical GPU in this repo's CI, which is
-> CPU-only. On a CUDA box `--device auto` picks it up automatically.
+## The exact machinery
 
-## What's here
+This is the part that has held up, and it needs no training at all.
+
+### Residue arithmetic (`lamb/algebra.py`)
+
+A value is carried as its residues modulo coprime moduli. Addition is cyclic
+convolution of residue distributions, subtraction cross-correlation, multiplication
+one small table per modulus — all carry-free, exact, and **differentiable on
+distributions**, so a model unsure of a residue composes that uncertainty instead of
+committing first.
+
+**Moduli are chosen for the multiplicative order of 10, not for size.** The network
+computes `n mod p` from digits as `Σ dᵢ·(10ⁱ mod p)`, whose coefficients repeat every
+`ord_p(10)` positions — and that period is how many digit positions must be *seen*
+before the modulus is learnable. Small primes are a trap: `ord(10)` is 16 mod 17, 18
+mod 19, 22 mod 23. The default `(2,5,9,11,7,13,37)` has max period 6 in 84 units, and
+three of them are the schoolbook divisibility rules.
+
+### Exact rationals (`lamb/rational.py`)
+
+Division is *not available* on plain residues: an inverse needs a divisor coprime to
+every modulus, and the short-period moduli are exactly the set that denies that — not
+one divisor from 2 to 12 is invertible. Carrying `(numerator, denominator)` makes
+division multiplication with the operands swapped: exact, closed, still
+differentiable. Decimals stop needing scale bookkeeping, because `3.25` **is**
+`325/100`.
+
+### Redundant residues (`RedundantResidueSystem`)
+
+CRT has no locality — one wrong residue gives a wildly wrong number, so answer
+accuracy is roughly per-residue accuracy raised to the modulus count. Carrying extra
+moduli detects that, and dropping each in turn identifies and repairs it. At the
+measured 0.985 per-residue accuracy this takes **0.900 → 0.996**, with no label and no
+training. The failure mode is **refusal, never a wrong answer**: where the evidence
+does not single out a culprit, it returns `None`.
+
+### The register machine (`lamb/regmachine.py`)
+
+Latents become **registers**; the model emits a program over them and the algebra
+executes it.
 
 ```
-lamb/                     Python package (torch)
-  device.py               device autodetect + mixed precision + scaling presets (GPU+CPU+RAM hybrid)
-  tokenizer.py            number-native tokenizer (digits, Abacus, value channel)
-  model/
-    embeddings.py         token + Abacus + value embeddings
-    transformer.py        RMSNorm, RoPE attention, SwiGLU, pre-norm block
-    latent_core.py        depth-recurrent latent reasoning (+ optional ACT halting)
-    memory.py             Titans/ATLAS-style test-time neural memory
-    lora.py               LoRA + DoRA adapters for shared-backbone POET (deeper adaptation)
-    lamb.py               the LAMb model: forward / loss / batched solve
-  selfplay/
-    proposer.py           learning-progress bandit (default; pluggable interface)
-    hyperproposer.py      GRPO-trained hypernetwork proposer, bandit-anchored
-    factoredhyper.py      factored GRPO proposer for the open-ended space
-    grammar.py            generative grammar of nested expressions
-    openended.py          curricula: fixed grid + open-ended (MCC admission)
-    grpo.py               GRPO utilities + solver RLVR objective (DAPO/Dr.GRPO options)
-    league.py             Red Queen: solver league + relative-fitness metrics
-    verifier.py           exact reward oracle (wraps the Rust kernels)
-    loop.py               Absolute-Zero-style self-play trainer
-  holdout.py              train/eval partition of the *problem space* (hash, not seed)
-  eval.py                 held-out accuracy, length generalization, test-time scaling
-  study.py                paired multi-seed arm comparison: exact permutation tests, power
-  coconut.py              Coconut continuous-thought reasoning + verifier-selected best-of-N (Stage A)
-  lotus.py                Stage A restructured: parallel supervised latent block (scales where Coconut doesn't)
-  comm.py                 latent inter-agent communication: speaker/listener + differentiable channel (Stage B)
-  comm_transfer.py        held-out-partner test: cross-pair swap + fresh-partner learnability (Stage B analysis)
-  comm_pop.py             partner randomization: population training -> canonical zero-shot latent code (Stage B)
-  train.py                CPU-first end-to-end entry point (single-agent self-play)
-  poet.py                 POET population of (environment, agent) pairs (Step 3)
-  poet_shared.py          shared-backbone POET: one backbone + per-environment adapters
-  memory_bench.py         long-context needle/passkey retrieval benchmark (infContext)
-  ruler_bench.py          RULER/BABILong-style suite: NIAH, multi-key, variable tracking
-rust/                     lamb_core native kernels (PyO3/maturin)
-  src/arith.rs            exact recursive-descent integer evaluator + verifier
-  src/curriculum.rs       deterministic problem sampler
-  src/store.rs            top-k associative store
-tests/                    pytest suite (native, tokenizer, model, memory, self-play)
-docs/                     ARCHITECTURE.md, ROADMAP.md
+registers 0..N-1   the operands, loaded exactly
+instruction t      (op, ptr_a, ptr_b) -> writes register N+t
+answer             the last register written
 ```
 
-## Test
+Registers are append-only and preallocated, so the dataflow is a DAG by construction,
+a pointer mask makes reading an unwritten register *unrepresentable*, and the shape is
+static (which is what compilers can fuse across). Execution is differentiable: a read
+is a mixture over registers, an operation a mixture over composed results.
+
+**This is what a non-differentiable executor cannot do.** PAL and Program-of-Thought
+call an external Python interpreter, so a wrong answer cannot tell a pointer which way
+to move — the program can only be imitated or reinforced, and RL on this latent block
+was measured inert. Here the answer loss reaches the pointer heads *through exact
+arithmetic*, and with the gold program removed entirely the model still reaches 1.000
+held-out accuracy.
+
+---
+
+## The language bridge (`lamb/bridge.py`)
+
+Language as a **peripheral**, not as the model. The core never learns a token
+distribution.
+
+| stage | learned? |
+| --- | --- |
+| text → frozen encoder → embeddings | no — cached once |
+| text → quantities → registers | **no** — regex plus the fixed digit→residue map |
+| embeddings → K latents (resampler) | yes |
+| latents → program over registers | yes |
+| program → answer | **no** — exact algebra |
+
+The encoder is run **once** over a dataset and cached, so it never participates in
+training and its size stops being a constraint. Quantities come out of the text by
+rule, with decimals carried as scaled integers — a rounded operand is a wrong operand
+in a ring. The learned surface is therefore the one thing that genuinely requires
+understanding: **which computation to perform.**
+
+---
+
+## Running things
 
 ```bash
-python -m pytest -q
+python -m lamb.train                   # self-play arithmetic trainer
+python -m lamb.lotus                   # parallel supervised latent block
+python -m lamb.coconut                 # sequential continuous thought (Stage A original)
+python -m lamb.comm                    # latent inter-agent communication (Stage B)
+python -m lamb.comm_pop                # partner randomization -> canonical code
+python -m lamb.study --task d2g1       # paired multi-seed comparison with error bars
+python -m lamb.memory_bench            # needle/passkey retrieval (infContext)
+python -m lamb.ruler_bench             # RULER-style long-context battery
+python -m lamb.poet                    # POET population of (environment, agent) pairs
 ```
 
-The suite includes an **in-context associative-recall** test that binds a fresh
-random key→label mapping every episode: passing it above chance is direct
-evidence the test-time memory works, since the mapping cannot live in the weights.
+---
 
-## Proposers and solver optimisation
+## Measurement discipline
 
-The proposer is a pluggable interface (`lamb.selfplay.proposer.BaseProposer`):
+Several claims here died under scrutiny, each from something unpinned in a
+comparison. The tooling that resulted is part of the repo:
 
-- **`bandit`** (default) — a learning-progress bandit, `softmax(beta * 4 s (1-s))`.
-  Robust, stateless, cannot collapse. Recommended for the small demo grid.
-- **`grpo_hyper`** — a **hypernetwork** mapping solver competence to the task
-  distribution, trained by **GRPO** with a **KL anchor to the bandit** (the anchor
-  is what averts the documented "proposer drifts to trivial/unsolvable tasks"
-  collapse). It concentrates on the highest-learnability cell and tracks the
-  frontier; its payoff over the tabular bandit is generalization on large/
-  continuous task spaces.
+- **`lamb/holdout.py`** — train/eval partition by a **hash of the problem**, not by
+  seed. Disjoint seeds are not disjoint problems: the depth-2/1-digit space holds
+  80k expressions and a 1000-step run draws 64k, so a seed-separated "held-out" set
+  was 53% contaminated.
+- **`lamb/study.py`** — paired multi-seed arms with **exact permutation tests** rather
+  than intervals, and a `coconut-long` arm that matches *wall clock* rather than step
+  count. It prints what the design can and cannot resolve, so a null is never mistaken
+  for an absence.
+- **`uv.lock`** — the environment is part of the comparison.
 
-Solver: **expert iteration** (default; teacher forcing on verified traces) or a
-**GRPO/RLVR** term (`--solver grpo`, added on top after a warm start, with DAPO
-dynamic sampling and an optional Dr.GRPO no-std normalization).
+The rule the project now runs on: **a confound recorded honestly in a document is not
+a control.** The gap between writing "this is a known confound" and spending the 50
+minutes that closes it was two wrong headline claims.
 
-**Red Queen coevolution.** Step 1 (`--red-queen`): a solver **league** (historical
-self-play), a **novelty** term (diversity maintenance), and relative-fitness
-metrics — `dominance` (does the solver keep beating its past on the current
-frontier?) and `forgetting`. On the bounded grid `dominance` decays to 0 as the
-space saturates. Step 2 (`--open-ended --proposer factored_hyper`): a generative
-grammar of nested expressions grown by **minimal-criterion admission**, with a
-**factored** hypernetwork proposer (fixed `D+G+O` outputs over an unbounded
-space). Measured: the space grows and the frontier advances with zero forgetting;
-`dominance` becomes bounded by *solver capacity* rather than task-space
-saturation — the ceiling moves from the curriculum to the model. Step 3
-(`python -m lamb.poet`) raises that ceiling with a **POET population**: per-
-environment specialist solvers, **transfer** across environments, and minimal-
-criterion **reproduction** of harder environments. Specialists + transfer are the
-capacity-scaling mechanism (rather than one larger model). Grounded in Digital Red
-Queen and POET/MCC.
+---
 
-## Benchmarks
+## Tests
 
-MMLU and general-LLM suites do not apply to a number-native math specialist. The
-right battery — length generalization, latent-reasoning tasks, long-context
-recall (BABILong / needle), and self-improvement curves — is described in
-[`docs/BENCHMARKS.md`](docs/BENCHMARKS.md). A length-generalization eval ships in
-`lamb.eval.length_generalization`.
+```bash
+python -m pytest -q          # 191 tests
+```
 
-## Extending
+Exactness properties are tested **without a model in the loop** — if composition is
+not exact by inspection, no amount of training rescues it.
 
-See [`docs/ROADMAP.md`](docs/ROADMAP.md) for the deeper-memory (ATLAS), full
-Coconut continuous-thought, richer task-space, and language-bridge directions.
+---
+
+## Repo map
+
+```
+lamb/
+  algebra.py        residue arithmetic; redundant residues for detect + correct
+  rational.py       exact rationals: division, and decimals
+  alu.py            latent ALU: one value per slot, composed by the algebra
+  regmachine.py     registers + emitted programs + differentiable execution
+  bridge.py         frozen-encoder peripheral, exact quantity extraction
+  holdout.py        train/eval partition of the problem space
+  study.py          paired multi-seed arms, permutation tests, power
+  lotus.py          parallel supervised latent block
+  coconut.py        sequential continuous thought (Stage A original)
+  comm*.py          latent inter-agent communication, transfer, populations
+  memory_bench.py   needle/passkey retrieval;  ruler_bench.py  RULER-style battery
+  eval.py           held-out accuracy, length generalization, test-time scaling
+  model/            transformer, latent core, test-time memory, embeddings
+  selfplay/         grammar, verifier, proposers, league, POET, GRPO
+docs/               ARCHITECTURE.md  BENCHMARKS.md  ROADMAP.md
+examples/           LAMb_Colab.ipynb
+rust/               optional exact kernels (Python fallback is equivalent)
+```
+
+`docs/ROADMAP.md` is the working record, including the retractions and why each
+happened. `docs/BENCHMARKS.md` explains why MMLU-style suites do not apply to a model
+with 22 tokens and what does.
+
+---
 
 ## License
 
-Apache-2.0.
+Apache-2.0. See `LICENSE`.
