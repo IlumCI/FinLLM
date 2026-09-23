@@ -50,7 +50,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from functools import reduce
-from typing import List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 import torch
 
@@ -207,12 +207,32 @@ class ResidueAlgebra:
     def __init__(self, system: Optional[ResidueSystem] = None, device: str = "cpu"):
         self.sys = system or ResidueSystem()
         self.device = device
-        # mul_table[k][i, j] = (i * j) % p  -- as a permutation-index tensor
-        self.mul_idx: List[torch.Tensor] = []
-        for p in self.sys.moduli:
-            i = torch.arange(p, device=device).view(p, 1)
-            j = torch.arange(p, device=device).view(1, p)
-            self.mul_idx.append((i * j) % p)
+        # Multiplication tables, cached *per device*.
+        #
+        # These are plain tensors held by an ordinary object, not buffers on an
+        # nn.Module, so ``module.to("cuda")`` does not move them -- it only moves
+        # parameters and registered buffers. Building them once at construction
+        # therefore leaves them on CPU while the activations go to the GPU, and the
+        # first multiplication fails on a device mismatch. Since this object is held
+        # by modules that do get moved, the table has to follow the *data* rather
+        # than the constructor argument.
+        self._mul_cache: Dict[torch.device, List[torch.Tensor]] = {}
+
+    def mul_idx_for(self, device: torch.device) -> List[torch.Tensor]:
+        """``(i * j) % p`` index tables on ``device``, built once per device."""
+        key = torch.device(device)
+        if key not in self._mul_cache:
+            tables = []
+            for p in self.sys.moduli:
+                i = torch.arange(p, device=key).view(p, 1)
+                j = torch.arange(p, device=key).view(1, p)
+                tables.append((i * j) % p)
+            self._mul_cache[key] = tables
+        return self._mul_cache[key]
+
+    @property
+    def mul_idx(self) -> List[torch.Tensor]:
+        return self.mul_idx_for(torch.device(self.device))
 
     # -- distribution helpers --------------------------------------------
     @staticmethod
@@ -247,10 +267,15 @@ class ResidueAlgebra:
         p = a.size(-1)
         outer = a.unsqueeze(-1) * b.unsqueeze(-2)                     # (..., i, j)
         out = torch.zeros(outer.shape[:-2] + (p,), device=a.device, dtype=outer.dtype)
-        return out.index_add(-1, self.mul_idx[k].reshape(-1),
+        idx = self.mul_idx_for(a.device)[k]
+        return out.index_add(-1, idx.reshape(-1),
                              outer.reshape(*outer.shape[:-2], -1))
 
     # -- the public operation --------------------------------------------
+    @staticmethod
+    def _fp32(xs: Sequence[torch.Tensor]) -> List[torch.Tensor]:
+        return [x.float() for x in xs]
+
     def compose_blocks(self, A: Sequence[torch.Tensor], B: Sequence[torch.Tensor],
                        op: str) -> List[torch.Tensor]:
         """Compose two already-split distributions, block by block.
@@ -259,8 +284,14 @@ class ResidueAlgebra:
         output straight into the next, so the flat/split conversion must not sit in
         the middle of the recursion.
         """
+        # Run the algebra in fp32 even under an autocast region. These are
+        # probability distributions over small rings: in fp16 the tail of a
+        # distribution underflows, the convolutions quietly lose mass, and a
+        # renormalised-but-wrong distribution decodes to a different integer --
+        # which in a residue system is not a near miss, it is a different number.
+        # The tensors are tiny, so the precision costs nothing worth having.
         out = []
-        for k, (x, y) in enumerate(zip(A, B)):
+        for k, (x, y) in enumerate(zip(self._fp32(A), self._fp32(B))):
             if op == "+":
                 out.append(self.add(x, y))
             elif op == "-":
@@ -280,8 +311,8 @@ class ResidueAlgebra:
         nothing about arithmetic has to be learned a second time at a magnitude
         the network has not seen.
         """
-        A = [self._probs(x, logits) for x in self.sys.split(a_flat)]
-        B = [self._probs(x, logits) for x in self.sys.split(b_flat)]
+        A = self._fp32([self._probs(x, logits) for x in self.sys.split(a_flat)])
+        B = self._fp32([self._probs(x, logits) for x in self.sys.split(b_flat)])
         return self.compose_blocks(A, B, op)
 
     def compose_exact(self, a: int, b: int, op: str) -> int:

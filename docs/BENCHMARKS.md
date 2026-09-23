@@ -97,10 +97,12 @@ reversed vs. forward digits and Abacus on/off to attribute the gains.
     a frozen speaker's code to `1.000`: private and co-adapted, yet learnable.
   - **Partner randomization** (`python -m lamb.comm_pop`) — the fix. A population
     (3 speakers × 3 listeners) trained with random pairing and the diagonal `(i,i)`
-    pairings held out reaches held-out **zero-shot `1.000`** (up from the single
-    pair's `0.004` swap): partner randomization makes the code canonical.
-    **Unconfirmed**: this was measured before `comm_pop.py` held out *problems* as
-    well as pairings, so it is pending a re-run on the clean split (ROADMAP 3b).
+    pairings held out reaches held-out **zero-shot `0.935`** against a blank prior
+    of ~0 and trained pairings at `0.941` (up from the single pair's `0.004` swap):
+    partner randomization makes the code canonical. Measured on the clean split
+    after `comm_pop.py` was fixed to hold out *problems* as well as pairings; the
+    earlier `1.000` was contaminated. The 1-digit eval partition is 22 problems, so
+    this resolves to ~4.5 points.
   Covered by `tests/test_comm.py`.
 - **ProntoQA / ProsQA** — the synthetic logical-reasoning sets Coconut used to
   show latent breadth-first reasoning beats token chain-of-thought. These need a

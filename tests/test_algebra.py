@@ -106,3 +106,34 @@ def test_summing_a_composed_distribution_is_not_a_loss():
     lg = torch.randn(2, s.n_units, requires_grad=True)
     out = torch.cat(alg.compose(lg, s.onehot([3, 3]), "+"), dim=-1)
     assert abs(float(out.detach().sum()) - 2 * len(s.moduli)) < 1e-4
+
+
+def test_multiplication_tables_follow_the_data_not_the_constructor():
+    """Regression: the first GPU run would have died on a device mismatch.
+
+    The tables are plain tensors held by an ordinary object, not buffers on an
+    nn.Module, so ``module.to("cuda")`` does not move them -- it moves parameters
+    and registered buffers only. Building them once at construction leaves them
+    behind when the activations move. They must be built per device, from the
+    device of the data.
+    """
+    alg = ResidueAlgebra(ResidueSystem())
+    assert alg._mul_cache == {}                       # nothing built eagerly
+    a = ResidueSystem().onehot([7])
+    alg.compose(a, a, "*", logits=False)
+    assert torch.device("cpu") in alg._mul_cache      # built on the data's device
+    tables = alg.mul_idx_for(torch.device("cpu"))
+    assert alg.mul_idx_for(torch.device("cpu")) is tables   # and cached, not rebuilt
+
+
+def test_half_precision_inputs_do_not_corrupt_the_result():
+    """Under autocast the activations arrive in fp16. These are distributions over
+    small rings: the tail underflows, the convolutions lose mass, and a
+    renormalised-but-wrong distribution decodes to a *different integer* -- which in
+    a residue system is not a near miss. The algebra therefore runs in fp32."""
+    s = ResidueSystem()
+    alg = ResidueAlgebra(s)
+    for a, b, op in ((123, 456, "*"), (9999, 1234, "+"), (77, 9999, "-")):
+        A, B = s.onehot([a]).half(), s.onehot([b]).half()
+        want = {"+": a + b, "-": a - b, "*": a * b}[op]
+        assert s.decode(alg.compose(A, B, op, logits=False)) == [want]

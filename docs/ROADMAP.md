@@ -666,15 +666,24 @@ CPU population the held-out (never-co-trained) pairings reach zero-shot `1.000`,
 matching trained pairings and up from the single pair's `0.004` swap — the private
 code becomes canonical. Other-Play realized in pure latent space.
 
-**Caveat, pending re-measurement.** `comm_pop.py` held out *pairings* but not
-*problems* until the sweep in 3a-iii; it trained and evaluated on the whole space,
-so that `1.000` was measured on problems the population had seen. The zero-shot
-*coordination* claim is about a never-co-trained speaker/listener pair and does not
-obviously depend on problem novelty — but "does not obviously depend on" is not a
-measurement, and this is exactly the kind of reasoning that produced the numbers
-3a-iv had to correct. The number stands until re-run, and is marked as unconfirmed
-until then. Note also that the 1-digit evaluation partition holds 22 problems, so a
-re-run there resolves to ~4.5 points; `--a-digits 2` gives 2431.
+**Re-measured on the clean split, and it holds.** `comm_pop.py` held out *pairings*
+but not *problems* until the sweep in 3a-iii, so the original `1.000` was measured on
+problems the population had trained on. Re-run with both held out (1600 steps, 3x3
+population):
+
+| | trained pairings | held-out zero-shot | blank |
+| --- | --- | --- | --- |
+| clean split | 0.941 | **0.935** (min 0.918, max 0.953) | 0.000–0.043 |
+
+Zero-shot pairings perform **indistinguishably from trained ones** against a blank
+prior at ~0. The headline number comes down from `1.000` to `0.935`, but the claim
+it was making — partner randomization makes the latent code *canonical* rather than
+private, so a never-co-trained pair coordinates as well as a trained one — is
+exactly what survives, and this is now the only Stage A/B claim measured on an
+uncontaminated split that did not shrink under scrutiny.
+
+The 1-digit evaluation partition holds 22 problems, so this resolves to ~4.5 points;
+`--a-digits 2` gives 2431 if a finer number is wanted.
 
 Remaining: larger populations, heterogeneous agent sizes, and cross-architecture
 transfer.
