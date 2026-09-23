@@ -666,6 +666,63 @@ operands is a small program space, `op_acc` at 0.603 says the answer-only arm's
 operator choices are partly canonical and partly not, and depth 3+ has not been run.
 The claim established is that outcome-only induction *works here*, not that it scales.
 
+### 3a-viii. Division and decimals: exact rationals in the ring
+
+Checking what the algebra could actually express for a grade-school word problem
+turned up two gaps, both fatal rather than inconvenient, and one of them silent.
+
+**Division was absent and unavailable.** In a residue system you divide by
+multiplying with a modular inverse, which exists only for divisors coprime to every
+modulus and gives the true quotient only when the division is exact. Worse, the
+moduli had been chosen for short digit-periods (3a-vi) — powers of 2 and 5, and
+divisors of `10^k − 1` — and that is *precisely* the set that makes small divisors
+non-invertible. Under `(2,5,9,11,7,13,37)`, **not one divisor from 2 to 12 has an
+inverse**, and "half as many" is the most common operation in GSM8K. The
+optimisation that made the encoder extrapolate is the one that made division
+impossible.
+
+**Mixed scales were silently wrong.** `extract_quantities` returns `3.25` as
+`(325, scale=2)` and `7` as `(7, scale=0)`; composing those gives `332`, i.e. 3.32.
+The parser tracked scale and the algebra did not, so any problem mixing decimals
+with integers produced a confident wrong number — the worst failure mode available.
+
+Both dissolve under one change (`lamb/rational.py`): carry a value as a **pair**
+`(numerator, denominator)`, each an ordinary residue vector.
+
+| | |
+| --- | --- |
+| `a/b + c/d` | `(ad + cb) / bd` |
+| `a/b − c/d` | `(ad − cb) / bd` |
+| `a/b × c/d` | `ac / bd` |
+| `a/b ÷ c/d` | **`ad / bc`** |
+
+Division becomes multiplication with the operands swapped: exact, closed, requiring
+no modular inverse, and still differentiable because every step is `+`, `−` or `×`
+on distributions. Decimals stop needing scale bookkeeping entirely — `3.25` *is*
+`325/100`, and a scale is just a denominator.
+
+Verified against Python's own `Fraction`: **0 errors over 1200 random operations**
+across all four operations, plus chains, `3.25 + 7 = 41/4`, and `7 ÷ 2 = 7/2`.
+
+The cost is that a fraction cannot be reduced in residue form, so denominators grow
+multiplicatively and that, not the design, sets the ring size. `RATIONAL_MODULI`
+`(64,125,27,11,7,13,37,101,41,271)` gives ±4.5e15 with every digit-period still ≤ 6;
+the worst chain a grade-school problem produces (five two-decimal values, denominator
+1e10) has five orders of magnitude of headroom. `denominator_magnitude` exists so a
+long chain approaching the ring is *observed* rather than discovered from a wrong
+answer.
+
+Two things this does not solve, recorded rather than left implicit:
+
+- **Division by zero is undetectable in the ring.** A zero denominator is a legal
+  residue vector; decoding raises rather than returning a number, so guarding it is
+  the program's job. That is the right place for it — the emitted program is what
+  knows whether a divisor could be zero — but it is now a thing the program must do.
+- **The batched-over-moduli path wastes more here.** Padding to the widest modulus
+  costs ~7× the arithmetic at `P=271`, against ~2× at `P=37`. On a GPU that is still
+  the right trade, since the path is launch-bound by four orders of magnitude; on CPU
+  it is not, and the per-modulus loop remains available.
+
 ## 3b. Latent inter-agent communication (Coconut) — Stage B implemented
 
 Implemented in `lamb/comm.py` (`python -m lamb.comm`). The message passed between
