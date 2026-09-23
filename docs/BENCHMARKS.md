@@ -51,22 +51,21 @@ reversed vs. forward digits and Abacus on/off to attribute the gains.
   together (cost `loops+1` forwards independent of latent count) and every latent
   position is supervised through the LM head against a gold **numeric** trace the
   evaluator generates for free. Nothing latent is ever decoded. Measured at matched
-  forward-pass budget on depth-2 nested expressions, **5 seeds per arm**
-  (`python -m lamb.study --task d2g1`):
-  `Coconut 0.504 ± 0.062 → LOTUS answer-only 0.826 ± 0.034 → LOTUS +trace 0.903 ±
-  0.024`, trace-probe `0.97` vs `0.14` at chance, on a hash-partitioned held-out set
-  (`lamb/holdout.py`; the earlier seed-separated split was 53% contaminated). Only
-  the **structural** step is established: the two arms' seed ranges are *disjoint*
-  (worst LOTUS 0.746 > best Coconut 0.703; exact permutation *p* = 0.008). The trace
-  step (+7.7) is positive on all 5 seeds but *p* = 0.064 — suggestive, not shown.
-  Variance also falls with each change (sd 0.138 → 0.076 → 0.054), which matters on
-  a baseline that swings 39 points on seed alone. Single-run figures previously
-  reported here (0.512/0.695/0.945) could not have distinguished any of this: at
-  Coconut's spread, ~61 seeds are needed to resolve a 5-point difference. The SWITCH
-  **entry** boundary (arXiv:2606.13106) showed **no measurable effect** once the eval
-  was clean (0.945 without vs 0.934 with), its RL rationale was falsified, and its
-  claimed +5.9 was always below what a single run can resolve — so it is off by
-  default. The *exit* marker is measurably harmful and off by
+  budget on depth-2 nested expressions, 5 seeds per arm (`python -m lamb.study`),
+  against a **wall-clock-matched** Coconut baseline (LOTUS costs 0.564 s/step against
+  0.335, so equal steps hand it 1.68x the compute): `Coconut equal-steps 0.504 →
+  Coconut equal-wall-clock 0.836 → LOTUS answer-only 0.826 → LOTUS +trace 0.903`,
+  trace-probe `0.97` vs `0.14` at chance, on a hash-partitioned held-out set
+  (`lamb/holdout.py`; the earlier seed-separated split was 53% contaminated).
+  **The structural claim is withdrawn**: against the compute-matched control the
+  parallel block is −0.010 at *p* = 0.80. An earlier version of this file reported
+  +32.3 from structure, which was measured against an unconverged baseline. The
+  surviving result is the trace supervision, +6.7 over that control at *p* = 0.040,
+  positive on all five seeds — and it prices the *supervision*, which is free here
+  only because an exact verifier generates the trace, rather than the architecture.
+  The SWITCH **entry** boundary (arXiv:2606.13106) showed no measurable effect once
+  the eval was clean (0.945 without vs 0.934 with) and its RL rationale was
+  falsified, so it is off by default. The *exit* marker is measurably harmful and off by
   default (500-step control: no-boundary `0.371`, `BOT`+`EOT` `0.176`, `BOT`-only
   `0.500`): a static marker between the latents and the answer readout blocks the
   readout from the latent state. A class-balanced `boundary_probe` ships as the

@@ -164,44 +164,57 @@ cliff), while the **looped, parallel-supervised** family stays flat (−1.5 at 3
 - **Still a blackbox.** Latent positions are never decoded; only the answer is
   emitted. The trace is a training signal, not an output.
 
-Measured on depth-2 nested expressions at matched forward-pass budget (1000 steps,
-batch 64, 0.28M params), **over 5 seeds per arm** (`python -m lamb.study --task d2g1`),
-decomposing the two changes:
+Measured on depth-2 nested expressions, 5 seeds per arm
+(`python -m lamb.study --task d2g1`). **The baseline that matters is `coconut-long`**:
+the same Coconut given the extra steps that make its *wall clock* equal to LOTUS's,
+since LOTUS costs 0.564 s/step against Coconut's 0.335 and equal step counts quietly
+hand it 1.68x the compute.
 
-| arm | structure | supervision | answer acc (mean ± sem, n=5) | sd | range | trace-probe |
-| --- | --- | --- | --- | --- | --- | --- |
-| Coconut (Stage A original) | sequential | answer-only | 0.504 ± 0.062 | 0.138 | 0.316–0.703 | — |
-| LOTUS | **parallel** | answer-only | **0.826 ± 0.034** | 0.076 | 0.746–0.910 | 0.14 (chance) |
-| LOTUS | parallel | **+ per-position trace** | **0.903 ± 0.024** | 0.054 | 0.811–0.951 | 0.97 |
+| arm | steps | answer acc (mean, n=5) | sd | range |
+| --- | --- | --- | --- | --- |
+| Coconut, equal steps | 1000 | 0.504 | 0.138 | 0.316–0.703 |
+| **Coconut, equal wall clock** | **1684** | **0.836** | **0.022** | 0.809–0.865 |
+| LOTUS, answer-only | 1000 | 0.826 | 0.076 | 0.746–0.910 |
+| LOTUS, + per-position trace | 1000 | 0.903 | 0.054 | 0.811–0.951 |
 
-- **Structure is worth +32.3 pts** at identical supervision, and it is the one
-  result here that a 5-seed study can actually establish: the two arms' seed ranges
-  are **disjoint** — the worst LOTUS run (0.746) beats the best Coconut run (0.703) —
-  which is an exact permutation *p* = 0.0079. It also costs nothing extra: no gold
-  trace, no new information, just the parallel block in place of the sequential one.
-- **The per-position trace adds +7.7 pts, and that is *not* established at n=5.**
-  Exact permutation *p* = 0.064; the paired sign-flip test cannot go below 0.0625
-  with 5 seeds however large the effect, and it sits exactly there (all 5 seeds
-  positive). Suggestive, consistent in sign, unproven. This is a large correction:
-  the single-run numbers said +25.0.
-- **Variance falls with each change** — sd 0.138 → 0.076 → 0.054. Given that the
-  Coconut baseline swings 39 points on seed alone, making training *reliable* is
-  arguably worth as much as the mean gain, and it is the less obvious result.
+Paired against the wall-clock-matched control:
 
-Earlier reported figures for these arms were 0.512 / 0.695 / 0.945, each a **single
-run**. Two things were wrong with that. The eval set was 53% contaminated (fixed in
-3a-iii below), and — the larger error — one run cannot separate an effect from seed
-noise at this scale. At Coconut's spread, **61 seeds** would be needed to resolve a
-5-point difference; nothing this repo claimed below ~18 points was ever measurable.
-That is the direct explanation for the SWITCH boundary saga in 3a-i: its claimed
-+5.9 was noise from the start, and no amount of care in *running* that single
-experiment could have revealed it.
+| comparison | mean | sign-flip *p* | permutation *p* |
+| --- | --- | --- | --- |
+| LOTUS answer-only − Coconut | **−0.010** | 0.688 | **0.802** |
+| LOTUS +trace − Coconut | **+0.067** | 0.0625 (floor) | **0.040** |
 
-The trace-probe (a diagnostic, never decoded) confirms the latent block really does
-carry the intermediates: 0.97 with supervision, chance (0.14) without. Note the
-third arm uses information the first two do not — the gold trace — free here only
-because an exact verifier exists; the second arm is the matched-supervision control,
-and it is the one that carries the result.
+- **The structural claim is not reduced, it is absent.** Parallel supervised latents
+  buy **nothing** over the sequential loop once compute is equalised: −1.0 points at
+  *p* = 0.80, negative on three of five seeds. An earlier version of this section
+  claimed **+32.3 pts** and called it the one result a 5-seed study could establish.
+  That number was measured against a Coconut arm that had simply not finished
+  training, and it is withdrawn.
+- **The variance claim is withdrawn too.** This section previously argued that the
+  restructure made training *reliable*, from Coconut's 39-point seed swing. That
+  swing was **undertraining, not instability**: given equal wall clock the same arm
+  has sd **0.022**, the tightest in the study — tighter than either LOTUS arm.
+- **The power figure was inflated by the same bug.** "61 seeds to resolve 5 points"
+  came from the undertrained arm's spread. Corrected, it is 19 seeds for
+  `lotus-answer`, 10 for `lotus-trace`, 2 for `coconut-long`. The constraint is real
+  and much milder than stated.
+- **What survives is the trace supervision, and only that.** +6.7 points over a
+  properly trained, compute-matched baseline, positive on all five seeds,
+  permutation *p* = 0.0397. It is also the claim tied to what this project actually
+  has that others do not: the gold trace is free here because an exact verifier
+  generates it. The honest statement is not "the parallel architecture wins" but
+  "the free exact supervision is worth about seven points."
+
+The trace-probe (a diagnostic, never decoded) confirms the latent block carries the
+intermediates: 0.97 with supervision against 0.14 at chance without. The `+trace`
+arm uses information the control does not, so the comparison is not like-for-like —
+it prices the supervision, not the structure.
+
+One methodological note, since this is the second time it has mattered: the single
+run figures originally reported here (0.512 / 0.695 / 0.945) were wrong for two
+independent reasons, a 53%-contaminated eval set (3a-iii) and a baseline that had
+not converged. Each was found only by building the control that could expose it.
+A caveat left standing in a document is not a control.
 
 Refs: LOTUS ([2606.31779](https://arxiv.org/abs/2606.31779)); SIM-CoT
 ([2509.20317](https://arxiv.org/abs/2509.20317)); looped transformers
@@ -225,10 +238,11 @@ probes to attach to.
 **The accuracy claim for this did not survive.** It was first measured as
 0.875 → 0.934 (+5.9) on a contaminated eval set. On the clean held-out partition the
 comparison is 0.945 without the boundary vs 0.934 with it — the sign flips. The
-multi-seed study in 3a-iv then explained *why* both numbers were meaningless: at
-this model's seed-to-seed spread, a 5-point difference needs ~61 seeds to resolve,
-so a single run could never have detected a real +5.9 nor ruled one out. The honest
-reading is **no measurable effect, and no measurement**. Together with 3a-ii (its RL rationale falsified), the entry
+multi-seed study in 3a-iv then explained *why* both numbers were meaningless — and
+was itself corrected once a compute-matched baseline existed. The sharp version: the
+boundary was never compared against a converged baseline, and at the spread of the
+arm it *was* compared against, a single run could not have detected a real +5.9 nor
+ruled one out. The honest reading is **no measurable effect, and no measurement**. Together with 3a-ii (its RL rationale falsified), the entry
 boundary is therefore **off by default**: it costs a sequence position and two
 vocabulary ids for nothing demonstrated. It is kept opt-in (`use_boundaries=True`)
 because it remains the only well-defined attachment point for a probe or an RL
@@ -390,43 +404,49 @@ with 5 seeds a normality assumption does more work than the data can support.
 
 What it found on the original setting (`--task d2g1`, 5 seeds, 1000 steps):
 
-| arm | mean ± sem | sd | range |
-| --- | --- | --- | --- |
-| Coconut | 0.504 ± 0.062 | 0.138 | 0.316–0.703 |
-| LOTUS answer-only | 0.826 ± 0.034 | 0.076 | 0.746–0.910 |
-| LOTUS + trace | 0.903 ± 0.024 | 0.054 | 0.811–0.951 |
+| arm | steps | mean | sd | range |
+| --- | --- | --- | --- | --- |
+| Coconut, equal steps | 1000 | 0.504 | 0.138 | 0.316–0.703 |
+| **Coconut, equal wall clock** | **1684** | **0.836** | **0.022** | 0.809–0.865 |
+| LOTUS answer-only | 1000 | 0.826 | 0.076 | 0.746–0.910 |
+| LOTUS + trace | 1000 | 0.903 | 0.054 | 0.811–0.951 |
 
-The **Coconut baseline swings 39 points on seed alone** (0.316 to 0.703). That is
-the number that reframes everything earlier: at that spread, resolving a 5-point
-difference needs ~61 seeds, so no single-run claim below roughly 18 points was ever
-measurable. The SWITCH boundary's +5.9 (3a-i) never had a chance of being real; it
-took two experiments to kill something that a power calculation would have
-predicted was unmeasurable.
+This section originally reported only the first, third and fourth rows and drew
+three conclusions from them. The `coconut-long` control was listed at the bottom as
+a known confound to be closed later. Running it retracted two of the three:
 
-One claim grows, one shrinks, and one was not being looked for:
+- **Structure: withdrawn.** Against the compute-matched control, LOTUS answer-only
+  is **−0.010** at permutation *p* = **0.802** — no effect at all, negative on three
+  of five seeds. It had been reported as **+32.3, established**, with disjoint seed
+  ranges and *p* = 0.0079. All of that was an artefact of comparing against a
+  Coconut arm that had not finished training.
+- **"Variance falls with each change": withdrawn.** The 39-point Coconut swing that
+  this section built its methodological argument on was **undertraining**. Given
+  equal wall clock, sd drops from 0.138 to **0.022** — the tightest arm in the
+  study, tighter than either LOTUS arm. The restructure does not make training more
+  reliable; finishing training does.
+- **The power figure was inflated by the same bug.** "~61 seeds to resolve 5 points"
+  used the undertrained arm's spread. Corrected: 19 seeds for `lotus-answer`, 10 for
+  `lotus-trace`, **2** for `coconut-long`. The constraint on small claims is real
+  but far milder, and the sharper statement about the SWITCH boundary (3a-i) is not
+  that it needed 61 seeds but that it was never compared against a converged
+  baseline either.
+- **Trace supervision: survives, and is now the only surviving claim.** +0.067 over
+  the compute-matched control, positive on all five seeds, permutation *p* =
+  **0.0397**. It uses information the control does not — the gold trace — so it
+  prices *the supervision*, not the architecture. That is a narrower claim than the
+  one this section used to make, and it is the one attached to what this project
+  actually has that others do not.
 
-- **Structure: +32.3 pts, established.** The seed ranges are disjoint — the worst
-  LOTUS run beats the best Coconut run — an exact permutation *p* = 0.0079. The
-  single-run estimate had been +18.3, so this was *under*-claimed.
-- **Trace supervision: +7.7 pts, not established.** Positive on all 5 seeds, but
-  *p* = 0.064, and the paired sign-flip test has a floor of 0.0625 at n=5 so it
-  could not have shown significance whatever the effect size. The single-run
-  estimate had been +25.0 — over-claimed by more than 3×.
-- **Variance falls with each change** (0.138 → 0.076 → 0.054). Unplanned, and on a
-  baseline this unstable, arguably the more useful property: the restructure makes
-  training *reliable*, not merely better on average.
+The spread is training variance rather than measurement noise: each arm is scored on
+512 held-out problems, so binomial standard error at these accuracies is ~1.8 points.
+Arms at the same seed share an eval set, so that component cancels from the paired
+differences entirely.
 
-The spread above is training variance, not measurement noise: each arm is scored on
-512 held-out problems, so the binomial standard error at these accuracies is ~1.8
-points — an order of magnitude below the 13.8-point seed spread it would have to
-explain. Arms at the same seed also share an eval set, so that component cancels
-from the paired differences entirely.
-
-Known confound, stated rather than buried: the arms are matched on **core forward
-passes** (Coconut's K=3 thoughts + answer = 4; LOTUS's loops=3 + answer = 4) but not
-on wall clock — LOTUS costs 0.564 s/step against Coconut's 0.335 s/step, because its
-sequences carry the latent block. The `coconut-long` arm in `lamb/study.py` is the
-control that removes it, giving Coconut the extra ~1.68× steps instead.
+The lesson is not about latent reasoning. **A confound recorded honestly in a
+document is not a control**, and the gap between writing "this is a known confound"
+and running the 50 minutes of compute that closes it was two wrong headline claims
+and a methodological argument built on a measurement artefact.
 
 ### 3a-v. Latent budget decoupled from trace length; space supervision added
 

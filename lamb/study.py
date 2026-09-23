@@ -349,6 +349,10 @@ def run_study(task_key: str, seeds: int = 5, steps: int = 1000, batch_size: int 
     needed is not known until the first few runs reveal the spread.
     """
     spec = TASKS[task_key]
+    if merge and not os.path.exists(merge):
+        # Validate before spending the compute, not after. Discovering a bad path
+        # in the summary step throws away every run that preceded it.
+        raise FileNotFoundError(f"--merge file does not exist: {merge}")
     jobs = [(arm, task_key, seed, steps, batch_size, d_model)
             for arm in arms for seed in range(seed_offset, seed_offset + seeds)]
     print(f"[study] {len(jobs)} runs = {len(arms)} arms x {seeds} seeds, "

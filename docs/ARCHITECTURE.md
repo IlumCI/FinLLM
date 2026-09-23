@@ -356,30 +356,34 @@ exit is deterministic. `boundary_probe` (class-balanced) exists as the monitorab
 handle, but is **not yet a result**: the model is either too accurate (too few
 errors to fit against) or too weak, so the number is currently noise.
 
-Measured on depth-2 nested expressions, matched forward-pass budget (1000 steps,
-0.28M params), on a hash-partitioned held-out set (`lamb/holdout.py` -- seed
-separation left the old eval 53% contaminated), **5 seeds per arm** via
-`lamb/study.py`:
-Coconut sequential/answer-only `0.504 +/- 0.062` -> LOTUS parallel/answer-only
-`0.826 +/- 0.034` (**+32.3 from structure alone**, identical supervision) -> LOTUS
-parallel/+trace `0.903 +/- 0.024` (+7.7 more), with the trace-probe at `0.97` vs
-`0.14` at chance without supervision.
+Measured on depth-2 nested expressions, 0.28M params, on a hash-partitioned held-out
+set (`lamb/holdout.py` -- seed separation left the old eval 53% contaminated), 5
+seeds per arm via `lamb/study.py`. The baseline is **wall-clock matched**, not
+step matched: LOTUS costs `0.564` s/step against Coconut's `0.335`, so equal steps
+hand it 1.68x the compute, and `coconut-long` gives Coconut the extra steps instead.
 
-Only the structural step is established: the arms' seed ranges are disjoint (worst
-LOTUS `0.746` > best Coconut `0.703`), an exact permutation `p = 0.008`. The trace
-step is positive on all 5 seeds but `p = 0.064`, and at n=5 the paired sign-flip
-test cannot fall below 0.0625 -- so it is suggestive, not shown. Earlier single-run
-figures (`0.512 / 0.695 / 0.945`) under-claimed the structure and over-claimed the
-trace by more than 3x; the Coconut baseline alone swings 39 points on seed, at which
-spread ~61 seeds are needed to resolve a 5-point difference. Per-arm variance falls
-with each change (sd `0.138 -> 0.076 -> 0.054`), which on a baseline that unstable
-is a result in itself.
+    Coconut, 1000 steps (equal steps)        0.504   sd 0.138
+    Coconut, 1684 steps (equal wall clock)   0.836   sd 0.022
+    LOTUS answer-only, 1000 steps            0.826   sd 0.076
+    LOTUS +trace, 1000 steps                 0.903   sd 0.054
 
-The third arm uses information the others do not (the gold trace), which is free
-only because an exact verifier exists; the second arm is the matched-supervision
-control and is the one carrying the result. The arms are matched on core forward
-passes but not wall clock (LOTUS `0.564` s/step vs Coconut `0.335`); the
-`coconut-long` arm in `lamb/study.py` is the control for that.
+Against the compute-matched control: LOTUS answer-only is `-0.010` at permutation
+`p = 0.802`, and LOTUS +trace is `+0.067` at `p = 0.040`.
+
+**The structural claim is withdrawn.** This section previously reported `+32.3 from
+structure alone` and called it the established result, on disjoint seed ranges with
+`p = 0.008`. That comparison was against a Coconut arm that had not finished
+training. Given equal wall clock the parallel block buys nothing. The claim that
+variance falls with the restructure is withdrawn for the same reason: Coconut's
+39-point seed swing was undertraining, and the converged arm has sd `0.022`, the
+tightest here.
+
+What survives is the trace supervision: `+6.7` points over a converged,
+compute-matched baseline, positive on all five seeds. It uses information the
+control does not -- the gold trace, free only because an exact verifier generates
+it -- so it prices the supervision rather than the architecture. The trace-probe
+(a diagnostic, never decoded) confirms the latent block carries the intermediates:
+`0.97` with supervision against `0.14` at chance without.
 
 ## 11. Latent inter-agent communication (Stage B, `lamb/comm.py`)
 
