@@ -244,6 +244,20 @@ class LotusConfig:
     # The parallel latent block.
     n_latent: int = 8        # L latent positions, computed together
     loops: int = 3           # R refinement passes over the block
+    # Trace tokens supervised per latent position (multi-token prediction on the
+    # latent block, arXiv:2404.19737). ``1`` is one latent per trace token -- the
+    # original layout, whose latent budget has to grow with trace length and so
+    # cannot reach the long traces where arXiv:2607.16972 finds continuous CoT
+    # collapsing. ``c > 1`` decouples the two: capacity is ``n_latent * c``.
+    trace_compress: int = 1
+    # Space supervision (arXiv:2606.20075's second dimension): a supervised-
+    # contrastive term over the latent manifold, so the latents are *arranged* by
+    # the value they stand for and not merely decodable to it. Off by default --
+    # it is an opt-in arm to be measured, not a claim. ``space_dim`` is the
+    # projection width the contrast is computed in.
+    space_coef: float = 0.0
+    space_dim: int = 32
+    space_tau: float = 0.1
     trace_coef: float = 0.5  # weight on per-position supervision (0 => answer-only ablation)
 
     # SWITCH-style boundary tokens (arXiv:2606.13106) wrapping the latent segment.

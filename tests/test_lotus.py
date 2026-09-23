@@ -180,3 +180,74 @@ def test_training_reduces_loss_and_learns_the_trace():
         last = tr._train_step(s)
     assert last["loss"] < first["loss"]
     assert last["trace"] < first["trace"]   # the latent block is learning the intermediates
+
+
+def test_trace_compression_decouples_latent_count_from_trace_length():
+    """``trace_compress=c`` supervises c trace tokens per latent position.
+
+    One latent per trace token cannot reach a long trace: the block would have to
+    grow with the trace. Multi-token prediction over the latents (arXiv:2404.19737)
+    gives capacity ``n_latent * c``, so half the positions hold the same trace.
+    """
+    wide = _trainer(n_latent=8, trace_compress=1)
+    tight = _trainer(n_latent=4, trace_compress=2)
+    for tr in (wide, tight):
+        tasks = tr._sample_batch(6)
+        prompt, aids, aab, apad, _, _, tr_ids, tr_mask = tr._collate(tasks)
+        _, latent_logits, _, _ = tr.reasoner(prompt, aids, aab, apad)
+        # targets and logits agree on the flattened (position, offset) layout
+        assert latent_logits.shape[:2] == tr_ids.shape == tr_mask.shape
+        assert latent_logits.size(1) == tr.cfg.n_latent * tr.reasoner.trace_compress
+    assert tight.reasoner.n_latent == wide.reasoner.n_latent // 2
+    assert tight._collate(tight._sample_batch(4))[6].shape[1] == 8   # same capacity
+
+
+def test_compression_is_exactly_off_at_c1():
+    """c=1 adds no parameters and no heads -- the uncompressed model, not a copy."""
+    off, on = _trainer(trace_compress=1), _trainer(trace_compress=3)
+    assert len(off.reasoner.mtp_heads) == 0
+    assert len(on.reasoner.mtp_heads) == 2          # head 0 is the identity
+    assert off.reasoner.model.num_params() == on.reasoner.model.num_params()
+    n_off = sum(p.numel() for p in off.reasoner.parameters())
+    n_on = sum(p.numel() for p in on.reasoner.parameters())
+    assert n_on > n_off                              # the extra heads are real
+
+
+def test_compressed_trace_supervision_trains():
+    tr = _trainer(steps=40, batch_size=24, n_latent=4, trace_compress=2, trace_coef=0.5)
+    first = tr._train_step(0)
+    last = first
+    for s in range(1, 40):
+        last = tr._train_step(s)
+    assert last["trace"] < first["trace"]
+
+
+def test_space_supervision_is_off_by_default_and_builds_nothing():
+    """The second supervision dimension is opt-in: an arm to measure, not a claim."""
+    off = _trainer()
+    assert off.cfg.space_coef == 0.0 and off.reasoner.space_head is None
+    assert off._train_step(0)["space"] == 0.0
+
+
+def test_space_loss_is_finite_and_reaches_its_head():
+    tr = _trainer(batch_size=32, space_coef=0.3)
+    assert tr.reasoner.space_head is not None
+    tasks = tr._sample_batch(32)
+    prompt, aids, aab, apad, _, _, tr_ids, tr_mask = tr._collate(tasks)
+    _, _, _, aux = tr.reasoner(prompt, aids, aab, apad)
+    loss = tr._space_loss(aux["latent_h"], tr_ids, tr_mask)
+    assert torch.isfinite(loss) and float(loss.detach()) > 0.0   # -inf*0 would be NaN
+    loss.backward()
+    assert float(tr.reasoner.space_head[1].weight.grad.norm()) > 0.0
+
+
+def test_space_loss_composes_with_trace_compression():
+    tr = _trainer(batch_size=32, n_latent=4, trace_compress=2, space_coef=0.3)
+    m = tr._train_step(0)
+    assert m["space"] > 0.0 and m["space"] == m["space"]
+
+
+def test_collapse_metric_is_a_bounded_cosine():
+    tr = _trainer()
+    c = tr.collapse_metric(32)
+    assert -1.0 <= c <= 1.0
