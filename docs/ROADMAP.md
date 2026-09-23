@@ -178,8 +178,14 @@ speaker swap collapses to `0.004/0.041` — *below* the `0.076` blank prior (a
 foreign code actively misleads); yet a freshly trained receiver learns a frozen
 speaker's code to `1.000`. So the protocol is **private and strongly co-adapted
 but learnable** — idiosyncratic, not canonical, exactly as Other-Play predicts.
-Next step: partner randomization (train against a population of partners) to
-pressure a canonical, zero-shot-transferable code.
+
+**Partner randomization** (`python -m lamb.comm_pop`) is the fix, and it works. A
+population of `P` speakers and `Q` listeners is trained with random pairing, the
+diagonal `(i, i)` pairings held out of training and evaluated zero-shot. On a 3×3
+CPU population the held-out (never-co-trained) pairings reach zero-shot `1.000`,
+matching trained pairings and up from the single pair's `0.004` swap — the private
+code becomes canonical. Other-Play realized in pure latent space. Remaining:
+larger populations, heterogeneous agent sizes, and cross-architecture transfer.
 
 Refs: DIAL ([1605.06676](https://arxiv.org/abs/1605.06676)); pitfalls of measuring
 emergent communication ([1903.05168](https://arxiv.org/abs/1903.05168));

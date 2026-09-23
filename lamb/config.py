@@ -251,6 +251,12 @@ class CommConfig:
     n_heads: int = 4
     recurrent_steps: int = 4
 
+    # Partner randomization (population; comm_pop). P speakers + Q listeners paired
+    # at random, with the diagonal (i, i) pairings held out from training so they
+    # can be evaluated zero-shot -- the test of whether the code became canonical.
+    pop_speakers: int = 3
+    pop_listeners: int = 3
+
     # Evaluation.
     eval_every: int = 200
     eval_tasks: int = 512

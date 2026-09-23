@@ -107,3 +107,31 @@ def test_held_out_partner_harness_runs():
     r = held_out_partner(cfg, tok, seeds=(0, 1), fresh_steps=6, n_tasks=24)
     assert set(r) >= {"A_matched", "A_swapped", "B_matched", "B_swapped", "blank", "fresh_partner"}
     assert all(0.0 <= v <= 1.0 for v in r.values())
+
+
+def test_population_holdout_and_training():
+    from lamb.comm_pop import PopulationComm
+    tok = ArithmeticTokenizer()
+    cfg = CommConfig(steps=6, batch_size=16, d_model=48, recurrent_steps=3, eval_tasks=24,
+                     pop_speakers=3, pop_listeners=3)
+    pop = PopulationComm(cfg, tok)
+    # the diagonal is held out; a listener is never paired with its own-index speaker
+    assert pop.holdout == {(0, 0), (1, 1), (2, 2)}
+    assert 0 not in pop._speakers_for(0) and set(pop._speakers_for(0)) == {1, 2}
+    for s in range(6):
+        loss = pop._train_step(s)
+    assert loss == loss  # finite
+    g = pop.eval_grid(n_tasks=24)
+    assert set(g) >= {"trained_mean", "holdout_mean", "blank"}
+    assert all(0.0 <= g[k] <= 1.0 for k in ("trained_mean", "holdout_mean", "blank"))
+
+
+def test_population_gradients_reach_speakers_and_channels():
+    from lamb.comm_pop import PopulationComm
+    tok = ArithmeticTokenizer()
+    cfg = CommConfig(batch_size=12, d_model=48, recurrent_steps=3, pop_speakers=2, pop_listeners=2)
+    pop = PopulationComm(cfg, tok)
+    pop._train_step(0)
+    sp = sum(float(p.grad.norm()) for p in pop.speakers[1].parameters() if p.grad is not None)
+    ch = sum(float(p.grad.norm()) for p in pop.channels[0].parameters() if p.grad is not None)
+    assert sp > 0.0 and ch > 0.0

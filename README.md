@@ -55,6 +55,7 @@ python -m lamb.coconut                         # Coconut continuous-thought reas
 python -m lamb.comm                            # latent inter-agent communication: message = a thought vector (Stage B)
 python -m lamb.comm --sweep                     # channel-bandwidth (capacity) sweep with DRU noise
 python -m lamb.comm_transfer                     # held-out-partner test: is the latent code private or shareable?
+python -m lamb.comm_pop                          # partner randomization: population -> canonical zero-shot code
 ```
 
 You will watch, from zero data:
@@ -93,6 +94,7 @@ lamb/                     Python package (torch)
   coconut.py              Coconut continuous-thought reasoning + verifier-selected best-of-N (Stage A)
   comm.py                 latent inter-agent communication: speaker/listener + differentiable channel (Stage B)
   comm_transfer.py        held-out-partner test: cross-pair swap + fresh-partner learnability (Stage B analysis)
+  comm_pop.py             partner randomization: population training -> canonical zero-shot latent code (Stage B)
   train.py                CPU-first end-to-end entry point (single-agent self-play)
   poet.py                 POET population of (environment, agent) pairs (Step 3)
   poet_shared.py          shared-backbone POET: one backbone + per-environment adapters

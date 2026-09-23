@@ -35,6 +35,7 @@ lamb-ruler-bench = "lamb.ruler_bench:main"
 lamb-coconut = "lamb.coconut:main"
 lamb-comm = "lamb.comm:main"
 lamb-comm-transfer = "lamb.comm_transfer:main"
+lamb-comm-pop = "lamb.comm_pop:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["lamb"]

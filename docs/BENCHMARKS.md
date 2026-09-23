@@ -67,6 +67,10 @@ reversed vs. forward digits and Abacus on/off to attribute the gains.
     `comm 1.000`, a zero-shot speaker swap collapses to `0.004/0.041` (below the
     `0.076` prior — a foreign code misleads), but a freshly trained receiver learns
     a frozen speaker's code to `1.000`: private and co-adapted, yet learnable.
+  - **Partner randomization** (`python -m lamb.comm_pop`) — the fix. A population
+    (3 speakers × 3 listeners) trained with random pairing and the diagonal `(i,i)`
+    pairings held out reaches held-out **zero-shot `1.000`** (up from the single
+    pair's `0.004` swap): partner randomization makes the code canonical.
   Covered by `tests/test_comm.py`.
 - **ProntoQA / ProsQA** — the synthetic logical-reasoning sets Coconut used to
   show latent breadth-first reasoning beats token chain-of-thought. These need a

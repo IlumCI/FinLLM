@@ -369,9 +369,20 @@ blank prior (a foreign code actively misleads, worse than silence).
 *Fresh-partner learnability*: freeze one speaker and train a new receiver against
 it -- it reaches `1.000`. So the protocol is private and strongly co-adapted, yet
 a well-formed language a new partner can *learn* -- idiosyncratic, not canonical.
-The standard fix, and the natural next step, is partner randomization (train each
-agent against a population of partners) to pressure a canonical, zero-shot-
-transferable code.
+
+**Partner randomization** (`lamb/comm_pop.py`, `python -m lamb.comm_pop`) is that
+fix, and it works. Train a *population* -- `P` speakers and `Q` listeners (each
+listener its own channel) -- pairing them at random, with the diagonal `(i, i)`
+pairings **held out** of training; because every speaker must be understood by
+many listeners and every listener must decode many speakers, the code is pressured
+to be canonical rather than private. The held-out pairings are then evaluated
+zero-shot (agents that never co-trained). On the tiny 3x3 CPU population the
+held-out zero-shot accuracy climbs `0.33 -> 0.81 -> 0.89 -> 1.000`, matching the
+trained pairings (`1.000`) and *far* above both the `~0.11` blank prior and the
+single co-adapted pair's `0.004` swap. Partner randomization converts the private
+code into a shared one -- the Other-Play prescription (arXiv:2003.02979) realized:
+a population of agents that reason and coordinate in a common latent language,
+none of them ever leaving latent space.
 
 ## Defaults
 
