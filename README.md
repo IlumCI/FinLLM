@@ -56,6 +56,7 @@ python -m lamb.lotus                           # Stage A restructured: parallel 
 python -m lamb.lotus --trace-coef 0             # ablation: parallel latents, answer-only supervision
 python -m lamb.latent_rl                       # does on-policy RL move the latent block? (measured: no)
 python -m lamb.study --task d2g1               # paired multi-seed comparison of the Stage A arms, with error bars
+LAMB_DEVICE=cuda python -m lamb.lotus          # every entry point honours LAMB_DEVICE; see examples/LAMb_Colab.ipynb
 python -m lamb.study --task d2g2 --seeds 5      # ...on a space too large to memorise (5.2e8 expressions)
 python -m lamb.comm                            # latent inter-agent communication: message = a thought vector (Stage B)
 python -m lamb.comm --sweep                     # channel-bandwidth (capacity) sweep with DRU noise
