@@ -230,3 +230,118 @@ def test_the_whole_machine_traces_as_one_graph():
     ex = dynamo.explain(lambda x: rm.run(x, vals)[0].packed)(torch.randn(4, 3, 16))
     assert ex.graph_break_count == 0
     assert ex.graph_count == 1
+
+
+def test_rational_mode_closes_the_instruction_set_under_division():
+    from lamb.regmachine import RATIONAL_OPS
+
+    rm = RegisterMachine(d_model=16, n_operands=4, n_instr=3, rational=True)
+    assert rm.ops == RATIONAL_OPS == ("+", "-", "*", "/")
+    assert rm.op_head.out_features == 4
+    # the integer path, which carries the depth-2 result, is untouched
+    assert RegisterMachine(d_model=8, n_operands=4, n_instr=3).ops == ("+", "-", "*")
+
+
+def test_division_executes_exactly_through_a_program():
+    """(48 / 2) + 3.25 -- a division and a decimal, neither expressible on plain
+    residues: small divisors have no modular inverse under these moduli, and a
+    scale is not something the integer ring tracks."""
+    from fractions import Fraction
+
+    from lamb.rational import RationalAlgebra
+    from lamb.regmachine import RATIONAL_OPS, RationalRegisterFile, execute_rational
+
+    R = RationalAlgebra()
+    vals = [[Fraction(48), Fraction(2), Fraction(13, 4), Fraction(0)]]
+    regs = RationalRegisterFile(R, vals, n_total=6)
+
+    def pick(width, idx):
+        t = torch.full((1, width), -30.0)
+        t[0, idx] = 30.0
+        return torch.softmax(t, -1)
+
+    regs.append(execute_rational(R, regs, pick(4, RATIONAL_OPS.index("/")),
+                                 pick(6, 0), pick(6, 1)))
+    assert regs.decode(4) == [Fraction(24)]
+    regs.append(execute_rational(R, regs, pick(4, RATIONAL_OPS.index("+")),
+                                 pick(6, 4), pick(6, 2)))
+    assert regs.decode(5) == [Fraction(48, 2) + Fraction(13, 4)]
+
+
+def test_soft_pointer_reads_are_incoherent_not_blended():
+    """A soft read does not average the registers -- it decodes each modulus
+    independently, so the winning residues can come from different registers and the
+    CRT lands nowhere near either. An earlier version of this test asserted the
+    'blend' story and failed, which is how the real behaviour was found.
+    """
+    import random
+    from fractions import Fraction
+
+    from lamb.rational import RationalAlgebra
+    from lamb.regmachine import RationalRegisterFile
+
+    R = RationalAlgebra()
+    regs = RationalRegisterFile(R, [[Fraction(1, 2), Fraction(3, 4)]], n_total=2)
+    assert R.decode(regs.read(torch.tensor([[1.0, 0.0]]))) == [Fraction(1, 2)]
+    assert R.decode(regs.read(torch.tensor([[0.0, 1.0]]))) == [Fraction(3, 4)]
+
+    rng = random.Random(0)
+    neither = 0
+    for _ in range(120):
+        a = Fraction(rng.randint(1, 50), rng.choice([1, 2, 3, 4, 5]))
+        b = Fraction(rng.randint(1, 50), rng.choice([1, 2, 3, 4, 5]))
+        rf = RationalRegisterFile(R, [[a, b]], n_total=2)
+        got = R.decode(rf.read(torch.tensor([[0.5, 0.5]])))[0]
+        neither += got not in (a, b)
+    assert neither > 10          # it happens often; ~30% over larger samples
+
+
+def test_redundant_moduli_catch_incoherent_reads():
+    """The redundancy added for the model's own residue errors covers this too: an
+    incoherent vector is not a legitimate value, and the range check does not care
+    what made it inconsistent. The soft-pointer caveat therefore degrades to
+    'detected' rather than 'silently wrong'."""
+    import random
+
+    from lamb.algebra import RedundantResidueSystem
+
+    s = RedundantResidueSystem((16, 25, 27, 11, 37, 7, 41), n_core=4)
+    alg = ResidueAlgebra(s)
+    rng = random.Random(0)
+    silent = incoherent = 0
+    for _ in range(150):
+        a, b = rng.randint(-40000, 40000), rng.randint(-40000, 40000)
+        rf = RegisterFile(s, [[a, b]], n_total=2, alg=alg)
+        blocks = rf.read(torch.tensor([[0.5, 0.5]]))
+        res = [int(bl.argmax(-1)) for bl in alg.unpack(blocks)]
+        if s.crt(res) in (a, b):
+            continue
+        incoherent += 1
+        if not s.detect(res):
+            silent += 1
+    assert incoherent > 0
+    assert silent == 0           # never silently wrong
+
+
+def test_gradients_reach_the_program_heads_through_rational_arithmetic():
+    from fractions import Fraction
+
+    rm = RegisterMachine(d_model=16, n_operands=4, n_instr=3, rational=True)
+    vals = [[Fraction(48), Fraction(2), Fraction(13, 4), Fraction(1)]] * 4
+    h = torch.randn(4, 3, 16, requires_grad=True)
+    regs, _ = rm.run(h, vals)
+    tgt = rm.sys.targets([48] * 4)
+    loss = sum(torch.nn.functional.nll_loss(torch.log(b.clamp_min(1e-9)), tgt[:, k])
+               for k, b in enumerate(rm.alg.unpack(regs.num[:, 6])))
+    loss.backward()
+    assert float(rm.ptr_a.weight.grad.norm()) > 0.0
+    assert float(rm.op_head.weight.grad.norm()) > 0.0
+
+
+def test_gold_program_indexes_into_whichever_instruction_set_is_in_use():
+    from lamb.regmachine import RATIONAL_OPS
+
+    t = parse_expr("(6+6)-(4-8)")
+    int_prog, _, _ = gold_program(t)
+    rat_prog, _, _ = gold_program(t, ops=RATIONAL_OPS)
+    assert [OPS[i[0]] for i in int_prog] == [RATIONAL_OPS[i[0]] for i in rat_prog]

@@ -723,6 +723,52 @@ Two things this does not solve, recorded rather than left implicit:
   the right trade, since the path is launch-bound by four orders of magnitude; on CPU
   it is not, and the per-modulus loop remains available.
 
+### 3a-x. Division in the register machine
+
+The rational layer (3a-viii) made division exact; this puts it in the machine's
+instruction set. `RegisterMachine(rational=True)` holds each register as a
+`(numerator, denominator)` pair and widens `OPS` from `(+,−,*)` to `(+,−,*,/)`,
+which costs one extra output on the operation head and nothing else — division is
+multiplication with the operands swapped, so no new primitive is introduced.
+
+Verified end to end: `(48 ÷ 2) + 3.25 → 109/4`, exactly, through emitted
+instructions — a division *and* a decimal, neither expressible on plain residues.
+Gradients still reach the pointer and operation heads through the rational
+arithmetic, so the outcome-only induction of 3a-vii is not given up to gain
+division.
+
+The integer path is left byte-for-byte as it was, since it carries the depth-2
+result; `rational=True` is opt-in.
+
+**One caveat, and the first version of this paragraph got it wrong.** I wrote that a
+soft pointer read produces a *blend* of the registers it mixes. A test written to
+demonstrate that falsified it: a 50/50 read over `1/2` and `3/4` decoded to exactly
+`1/2`. Investigating found something worse. Decoding takes an argmax **per modulus,
+independently**, so the winning residues need not come from the same register; when
+they disagree the CRT lands somewhere unrelated to either input. Measured over random
+pairs, **~30% of soft reads decode to a value in neither register**, and the failure
+is *incoherence*, not averaging.
+
+It is also not specific to rationals — the integer register file has it too, for the
+same reason, which the original framing obscured.
+
+Two things contain it, one of which was already built:
+
+- **Sharp pointers are exact**, and training drives pointers sharp: both depth-2 arms
+  reached fully determined pointers and scored 1.000 answer accuracy.
+- **Redundant moduli catch the rest.** An incoherent residue vector is not a
+  legitimate value, so the range check of 3a-ix flags it without caring what made it
+  inconsistent. Measured: **100% of incoherent reads detected, none silently wrong.**
+  The redundancy added for the model's own residue errors covers this too.
+
+Training is unaffected either way, since the losses read distributions rather than
+the argmax.
+
+**Still open:** the grammar generates `+`, `−` and `*`, so there is no division
+*training* data yet — the machine can execute `/` but has not been asked to learn
+when to emit it. And a zero divisor remains undetectable in the ring (3a-viii), so
+guarding it belongs to the emitted program.
+
 ### 3a-ix. Redundant residues: correcting errors, not just detecting them
 
 The harshest constraint on the residue representation is that **CRT has no

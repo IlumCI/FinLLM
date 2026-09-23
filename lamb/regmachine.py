@@ -40,6 +40,7 @@ so it cannot itself be wrong.
 
 from __future__ import annotations
 
+from fractions import Fraction
 from typing import List, Optional, Sequence, Tuple
 
 import torch
@@ -49,6 +50,10 @@ from .algebra import ResidueAlgebra, ResidueSystem
 from .alu import Tree, is_leaf
 
 OPS: Tuple[str, ...] = ("+", "-", "*")
+# With rational registers the instruction set closes under division. Kept separate
+# from OPS so the integer path -- which carries the depth-2 result in ROADMAP
+# 3a-vii -- stays byte-for-byte what produced it.
+RATIONAL_OPS: Tuple[str, ...] = ("+", "-", "*", "/")
 Instr = Tuple[int, int, int]          # (op index, register a, register b)
 
 
@@ -61,7 +66,7 @@ def operands(t: Tree) -> List[int]:
     return operands(l) + operands(r)
 
 
-def gold_program(t: Tree) -> Tuple[List[Instr], int, int]:
+def gold_program(t: Tree, ops: Tuple[str, ...] = OPS) -> Tuple[List[Instr], int, int]:
     """``(instructions, n_operands, output register)`` in post-order.
 
     Post-order is a valid topological order of the dataflow, and it is the order the
@@ -84,7 +89,7 @@ def gold_program(t: Tree) -> Tuple[List[Instr], int, int]:
             op, l, r = sub
             ra, rb = walk(l), walk(r)
         dest = n_operands + len(instrs)
-        instrs.append((OPS.index(op), ra, rb))
+        instrs.append((ops.index(op), ra, rb))
         return dest
 
     out = walk(t)
@@ -236,14 +241,30 @@ class RegisterMachine(nn.Module):
     """
 
     def __init__(self, d_model: int, n_operands: int, n_instr: int,
-                 system: Optional[ResidueSystem] = None, device: str = "cpu"):
+                 system: Optional[ResidueSystem] = None, device: str = "cpu",
+                 rational: bool = False):
         super().__init__()
-        self.sys = system or ResidueSystem()
-        self.alg = ResidueAlgebra(self.sys, device=device)
+        self.rational = rational
+        if rational:
+            # Rational registers close the instruction set under division, which
+            # plain residues cannot offer: an inverse needs a divisor coprime to
+            # every modulus, and the short-digit-period moduli are exactly the set
+            # that denies that (ROADMAP 3a-viii). The ring is larger because
+            # denominators multiply.
+            from .rational import RationalAlgebra
+
+            self.ralg = RationalAlgebra(system, device=device)
+            self.sys = self.ralg.sys
+            self.alg = self.ralg.alg
+        else:
+            self.sys = system or ResidueSystem()
+            self.alg = ResidueAlgebra(self.sys, device=device)
+            self.ralg = None
+        self.ops = RATIONAL_OPS if rational else OPS
         self.n_operands = n_operands
         self.n_instr = n_instr
         self.n_slots = n_operands + n_instr
-        self.op_head = nn.Linear(d_model, len(OPS))
+        self.op_head = nn.Linear(d_model, len(self.ops))
         self.ptr_a = nn.Linear(d_model, self.n_slots)
         self.ptr_b = nn.Linear(d_model, self.n_slots)
 
@@ -274,8 +295,14 @@ class RegisterMachine(nn.Module):
         being tested is whether it can emit the right *program*.
         """
         op_l, a_l, b_l = self.logits(latent_h)
-        regs = RegisterFile(self.sys, values, str(latent_h.device),
-                            n_total=self.n_slots)
+        if self.rational:
+            vals = [[v if isinstance(v, Fraction) else Fraction(int(v)) for v in row]
+                    for row in values]
+            regs = RationalRegisterFile(self.ralg, vals, n_total=self.n_slots,
+                                        device=str(latent_h.device))
+        else:
+            regs = RegisterFile(self.sys, values, str(latent_h.device),
+                                n_total=self.n_slots)
         for t in range(self.n_instr):
             # Softmax over the *full* register file rather than a slice. The causal
             # mask is already -inf past the written tail, so those entries come out
@@ -283,7 +310,8 @@ class RegisterMachine(nn.Module):
             ow = self._select(op_l[:, t], tau, hard)
             pa = self._select(a_l[:, t], tau, hard)
             pb = self._select(b_l[:, t], tau, hard)
-            regs.append(execute(self.alg, regs, ow, pa, pb))
+            regs.append(execute_rational(self.ralg, regs, ow, pa, pb) if self.rational
+                        else execute(self.alg, regs, ow, pa, pb))
         return regs, (op_l, a_l, b_l)
 
     def program_loss(self, logits, gold: Sequence[Sequence[Instr]]) -> torch.Tensor:
@@ -431,3 +459,81 @@ class RegMachineTrainer:
                 "program_acc": float(whole.min(dim=1).values.mean()),  # kept: old name
                 "op_acc": float(ok_op.mean()), "ptr_acc": float((ok_a * ok_b).mean()),
                 "program_loss": float(prog), "answer_loss": float(ans)}
+
+
+class RationalRegisterFile:
+    """Registers holding rationals: a numerator and a denominator, both packed.
+
+    Division is the operation grade-school word problems are built on -- "half as
+    many", "split among four" -- and it is not available on plain residues: an
+    inverse exists only for divisors coprime to every modulus, and the moduli were
+    chosen for short digit-periods, which is exactly the set that makes small
+    divisors non-invertible (ROADMAP 3a-viii). Carrying ``(num, den)`` makes
+    division multiplication with the operands swapped, so the instruction set closes
+    without a single new primitive.
+
+    **One caveat, and it is not the one it looks like.** A soft pointer read does
+    not produce a *blend* of the registers it mixes. Decoding takes an argmax per
+    modulus independently, so the winning residues need not all come from the same
+    register; when they disagree the CRT lands somewhere unrelated to either input.
+    Measured over random pairs, ~30% of soft reads decode to a value that was in
+    neither register, and the error is one of **incoherence**, not averaging.
+
+    This is not specific to rationals -- the integer register file has it too, for
+    the same reason. Two things contain it. Sharp pointers are exact, and training
+    drives pointers sharp (the depth-2 arms reached fully determined pointers, and
+    both scored 1.000). And with redundant moduli an incoherent residue vector is
+    not a legitimate value, so the range check of
+    :class:`lamb.algebra.RedundantResidueSystem` flags it: measured, **100% of
+    incoherent reads detected, none silently wrong**. The redundancy built for the
+    model's own residue errors turns out to cover this as well, because the range
+    check does not care what made the vector inconsistent.
+
+    Training is unaffected either way, since the losses read the distributions
+    rather than the argmax.
+    """
+
+    def __init__(self, ralg, values: Sequence[Sequence[Fraction]],
+                 n_total: Optional[int] = None, device: str = "cpu",
+                 sharp: float = 30.0):
+        self.r = ralg
+        self.sys = ralg.sys
+        b, n = len(values), len(values[0])
+        self.n_total = n_total if n_total is not None else n
+        self.n_filled = n
+        flat = [v for row in values for v in row]
+        num, den = self.r.encode(flat, device)                 # (b*n, K, P)
+        K, P = num.shape[-2], num.shape[-1]
+        pad = self.n_total - n
+        def lay(x):
+            x = x.view(b, n, K, P)
+            if pad:
+                x = torch.cat([x, torch.zeros(b, pad, K, P, device=x.device)], dim=1)
+            return x
+        self.num, self.den = lay(num), lay(den)
+
+    def append(self, new) -> None:
+        slot = torch.zeros(self.n_total, 1, 1, device=new[0].device, dtype=new[0].dtype)
+        slot[self.n_filled] = 1.0
+        self.num = self.num + slot * new[0].unsqueeze(1)
+        self.den = self.den + slot * new[1].unsqueeze(1)
+        self.n_filled += 1
+
+    def read(self, ptr: torch.Tensor):
+        return (torch.einsum("br,brkp->bkp", ptr, self.num),
+                torch.einsum("br,brkp->bkp", ptr, self.den))
+
+    def decode(self, index: int) -> List[Fraction]:
+        return self.r.decode((self.num[:, index], self.den[:, index]))
+
+
+def execute_rational(ralg, regs: RationalRegisterFile, op_w: torch.Tensor,
+                     ptr_a: torch.Tensor, ptr_b: torch.Tensor):
+    """One instruction over rationals. ``op_w`` is ``(B, 4)`` across ``RATIONAL_OPS``."""
+    a, b = regs.read(ptr_a), regs.read(ptr_b)
+    out = None
+    for oi, op in enumerate(RATIONAL_OPS):
+        n, d = ralg.compose(a, b, op)
+        w = op_w[:, oi].view(-1, 1, 1)
+        out = (w * n, w * d) if out is None else (out[0] + w * n, out[1] + w * d)
+    return out
