@@ -578,6 +578,11 @@ idea. Measured: a *fixed* digit→residue encoder plus algebraic composition is 
 at depth 2 width 8, depth 3 width 4, depth 4 width 3 and depth 5 width 2, with
 nothing learned anywhere.
 
+Confirmed by a follow-up: training on width 2 **alone**, with the whole budget on
+one width, leaves leaf-residue accuracy flat at chance for 1200 steps (0.050, 0.055,
+0.047, 0.047 at steps 300/600/900/1200, every modulus at chance). It does not learn
+slowly; it never starts. So the fixed encoder is not an optimisation, it is required.
+
 That reframes what the ALU is for, and the reframing is not a consolation. With a
 fixed encoder and a known structure, LAMb+ALU on synthetic arithmetic **degenerates
 to an exact calculator** — correct at any width and depth, and evidence of nothing,
