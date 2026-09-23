@@ -18,11 +18,13 @@ bound, gated purely by the solver's own competence -- the mechanism that keeps
 
 from __future__ import annotations
 
+import random
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
 from ..config import TrainConfig
+from ..holdout import is_heldout
 from .grammar import Descriptor, TaskGrammar
 from .verifier import Verifier
 
@@ -38,9 +40,35 @@ class FixedGridCurriculum:
     def descriptors(self) -> List[Tuple[str, int, int]]:
         return self._descs
 
-    def sample(self, idx: int, seed: int) -> Tuple[str, str]:
+    def sample(self, idx: int, seed: int, exclude_heldout: bool = False) -> Tuple[str, str]:
+        """A problem from grid cell ``idx``, optionally outside the eval partition.
+
+        The two curricula have to accept the same call, since the self-play loop
+        holds either one.
+        """
         op, a, b = self._descs[idx]
-        return self.verifier.sample(op, a, b, seed)
+        if not exclude_heldout:
+            return self.verifier.sample(op, a, b, seed)
+        rng = random.Random(seed)
+        last = self.verifier.sample(op, a, b, seed)
+        for _ in range(64):
+            expr, ans = self.verifier.sample(op, a, b, rng.randint(0, 2 ** 31 - 1))
+            last = (expr, ans)
+            if not is_heldout(expr):
+                return expr, ans
+        return last
+
+    def sample_heldout(self, idx: int, seed: int, tries: int = 256) -> Tuple[str, str]:
+        """A problem from grid cell ``idx``, drawn from the **evaluation** partition."""
+        op, a, b = self._descs[idx]
+        rng = random.Random(seed)
+        last = self.verifier.sample(op, a, b, seed)
+        for _ in range(tries):
+            expr, ans = self.verifier.sample(op, a, b, rng.randint(0, 2 ** 31 - 1))
+            last = (expr, ans)
+            if is_heldout(expr):
+                return expr, ans
+        return last
 
     def label(self, idx: int) -> str:
         op, a, b = self._descs[idx]
@@ -95,8 +123,18 @@ class OpenEndedCurriculum:
     def descriptors(self) -> List[Descriptor]:
         return self._descs
 
-    def sample(self, idx: int, seed: int) -> Tuple[str, str]:
-        return self.grammar.sample(self._descs[idx], seed)
+    def sample(self, idx: int, seed: int, exclude_heldout: bool = False) -> Tuple[str, str]:
+        """A problem from cell ``idx``.
+
+        ``exclude_heldout`` keeps the evaluation partition (:mod:`lamb.holdout`)
+        out of training. It defaults to False so that an evaluator calling this
+        still sees the whole space; every *training* caller passes True.
+        """
+        return self.grammar.sample(self._descs[idx], seed, exclude_heldout=exclude_heldout)
+
+    def sample_heldout(self, idx: int, seed: int, tries: int = 256) -> Tuple[str, str]:
+        """A problem from cell ``idx``, drawn from the **evaluation** partition."""
+        return self.grammar.sample_heldout(self._descs[idx], seed, tries)
 
     def label(self, idx: int) -> str:
         return self._descs[idx].label()

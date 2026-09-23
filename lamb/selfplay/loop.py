@@ -194,7 +194,7 @@ class SelfPlayTrainer:
         problems: List[str] = []
         answers: List[str] = []
         for idx in cells:
-            expr, ans = self.curriculum.sample(idx, self._next_seed())
+            expr, ans = self.curriculum.sample(idx, self._next_seed(), exclude_heldout=True)
             problems.append(expr)
             answers.append(ans)
 
@@ -309,7 +309,8 @@ class SelfPlayTrainer:
         )
 
     def _instance(self, cell_idx: int) -> Tuple[str, str]:
-        return self.curriculum.sample(cell_idx, self._next_seed())
+        """A training instance -- never from the evaluation partition."""
+        return self.curriculum.sample(cell_idx, self._next_seed(), exclude_heldout=True)
 
     def _update_success_ema(self, cells: List[int], correct: List[bool]) -> None:
         per_cell: Dict[int, List[float]] = defaultdict(list)

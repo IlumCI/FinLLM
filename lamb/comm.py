@@ -70,8 +70,18 @@ class CommTask:
         return self.rng.randint(10 ** (digits - 1), 10 ** digits - 1)
 
     def sample(self, n: int) -> List[Sample]:
+        """``n`` samples from this split.
+
+        Flat rejection sampling, not recursion: topping up by calling ``sample``
+        again let the *inner* call's repeat-padding fire before the outer loop had
+        drawn a single fresh sample, so a partition that merely needed more draws
+        was padded with duplicates instead. Draws are bounded, then -- and only
+        then -- a genuinely small partition is cycled to length.
+        """
         out: List[Sample] = []
-        for _ in range(n):
+        budget = 64 * max(1, n)          # bounded: the eval split accepts ~15%
+        while len(out) < n and budget > 0:
+            budget -= 1
             x, y = self._num(self.a_digits), self._num(self.b_digits)
             op = self.rng.choice(self.ops)
             full = f"{x}{op}{y}"
@@ -83,15 +93,36 @@ class CommTask:
             if val is None:  # never for +/- at these widths, but stay safe
                 continue
             out.append((str(x), f"{op}{y}", str(val), full))
-        for _ in range(64):  # top up if any were skipped (bounded for tiny splits)
-            if len(out) >= n:
-                break
-            out.extend(self.sample(n - len(out)))
         if out:                       # a tiny partition must repeat; cycle, do not
             base = list(out)          # hammer one element
             while len(out) < n:
                 out.append(base[len(out) % len(base)])
         return out[:n]
+
+    def unique_count(self, split: Optional[str] = None) -> int:
+        """Exact number of distinct problems in a split -- the eval resolution.
+
+        At 1 digit the whole space is 200 problems, so the eval partition holds
+        about 30: an accuracy measured there has a granularity of ~3 points
+        however many samples are drawn. Worth knowing before reading a number.
+        """
+        sp = self.split if split is None else split
+        def bounds(d: int):
+            return (0, 9) if d <= 1 else (10 ** (d - 1), 10 ** d - 1)
+
+        lo_a, hi_a = bounds(self.a_digits)
+        lo_b, hi_b = bounds(self.b_digits)
+        k = 0
+        for x in range(lo_a, hi_a + 1):
+            for y in range(lo_b, hi_b + 1):
+                for op in self.ops:
+                    full = f"{x}{op}{y}"
+                    if sp == "train" and is_heldout(full):
+                        continue
+                    if sp == "eval" and not is_heldout(full):
+                        continue
+                    k += 1
+        return k
 
 
 class Channel(nn.Module):

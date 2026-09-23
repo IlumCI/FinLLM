@@ -9,6 +9,7 @@ from typing import Dict, List, Optional, Tuple
 import torch
 
 from ._native import sample_problem, verify
+from .holdout import is_heldout
 from .model.lamb import LAMb
 from .tokenizer import ArithmeticTokenizer
 
@@ -23,12 +24,20 @@ def evaluate(
     seed: int = 1234,
     n_steps: Optional[int] = None,
     max_answer_len: int = 20,
+    heldout_only: bool = True,
 ) -> Dict[str, object]:
     """Solve fresh problems for every difficulty cell and score with the verifier.
 
     Returns ``overall`` accuracy and a ``per_cell`` map. ``n_steps`` overrides the
     latent thinking budget, so passing a larger value probes test-time compute
     scaling on a fixed model.
+
+    ``heldout_only`` (the default) draws from the evaluation partition
+    (:mod:`lamb.holdout`), which training rejects. It matters most for the cells
+    at or below the trained operand width: those are the ones a run can memorise,
+    and they are the baseline that the extrapolation cliff in
+    :func:`length_generalization` is measured *against*, so contaminating them
+    exaggerates the cliff. Widths above the trained maximum are unseen either way.
     """
     model.eval()
     rng = random.Random(seed)
@@ -37,6 +46,11 @@ def evaluate(
     for ci, (op, a, b) in enumerate(grid):
         for _ in range(n_per_cell):
             expr, _ = sample_problem(op, a, b, rng.randint(0, 2**31 - 1))
+            if heldout_only:
+                for _ in range(256):     # bounded: a 1-digit cell is only ~100 wide
+                    if is_heldout(expr):
+                        break
+                    expr, _ = sample_problem(op, a, b, rng.randint(0, 2**31 - 1))
             problems.append(expr)
             cell_of.append(ci)
 
@@ -54,7 +68,16 @@ def evaluate(
         n_ok += int(ok)
 
     per_cell = {grid[ci]: correct[ci] / total[ci] for ci in total}
-    return {"overall": n_ok / max(1, len(problems)), "per_cell": per_cell}
+    # How many *distinct* problems each cell's number actually rests on. A 1-digit
+    # cell holds 100 problems, so its evaluation partition is about 9: that number
+    # has a granularity of ~11 points however many samples are drawn, and reading
+    # it without knowing that is how a noise-sized difference becomes a claim.
+    distinct: Dict[int, set] = defaultdict(set)
+    for ci, expr in zip(cell_of, problems):
+        distinct[ci].add(expr)
+    per_cell_unique = {grid[ci]: len(v) for ci, v in distinct.items()}
+    return {"overall": n_ok / max(1, len(problems)), "per_cell": per_cell,
+            "per_cell_unique": per_cell_unique}
 
 
 @torch.no_grad()
@@ -84,7 +107,9 @@ def evaluate_curriculum(
     cell_of: List[int] = []
     for ci in range(len(descs)):
         for _ in range(n_per_cell):
-            expr, ans = curriculum.sample(ci, rng.randint(0, 2**31 - 1))
+            # Held out by problem, not by seed: the trainer rejects this
+            # partition, so a number measured here is genuinely unseen.
+            expr, ans = curriculum.sample_heldout(ci, rng.randint(0, 2**31 - 1))
             problems.append(expr)
             answers.append(ans)
             cell_of.append(ci)

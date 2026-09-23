@@ -103,7 +103,11 @@ class PopulationComm:
         for m in self.speakers + self.listeners + self.channels:
             params += list(m.parameters())
         self.opt = torch.optim.AdamW(params, lr=cfg.lr, weight_decay=cfg.weight_decay)
-        self.task = CommTask(cfg.a_digits, cfg.b_digits, cfg.ops, cfg.seed)
+        # Train on the training partition only. This was missed when the hash
+        # partition landed in lamb/comm.py: the population trainer kept drawing
+        # from the whole space, so the zero-shot numbers below were measured on
+        # problems it had trained on.
+        self.task = CommTask(cfg.a_digits, cfg.b_digits, cfg.ops, cfg.seed, split="train")
         self.max_ans = cfg.max_answer_len()
 
     def _speakers_for(self, j: int) -> List[int]:
@@ -149,8 +153,16 @@ class PopulationComm:
         return sum(a is not None and verify(s[3], a) for s, a in zip(samples, ans)) / n
 
     def _eval_set(self, n: int) -> List[Sample]:
+        """The evaluation partition -- held out by problem, not merely by seed.
+
+        Two things are held out here and they are independent: the *pairings*
+        ``(i, i)``, which is the zero-shot-coordination question, and the
+        *problems*, which is the generalisation question. Holding out only the
+        pairings, as this did, measures a zero-shot partner on problems the
+        population was trained on.
+        """
         holdout = CommTask(self.cfg.a_digits, self.cfg.b_digits, self.cfg.ops,
-                           self.cfg.seed * 7 + 99_991)
+                           self.cfg.seed * 7 + 99_991, split="eval")
         return holdout.sample(n)
 
     @torch.no_grad()

@@ -321,14 +321,14 @@ def run_experiment(cfg: LotusConfig, tok: ArithmeticTokenizer, mcfg: ModelConfig
 
     # Arm 1: keep training supervised (controls for "more steps help").
     if "sft" in arms:
-     sft_arm = LotusTrainer(cfg, tok, mcfg)
-     sft_arm.reasoner.load_state_dict(snapshot)
-     for s in range(sft_steps, sft_steps + rl_steps):
-        sft_arm._train_step(s)
-     results["sft_continued"] = evaluate(
-        LatentPolicy(sft_arm.reasoner, use_switch=False).to(device),
-        held, tok, verifier, max_len, device)
-     print(f"  [arm sft]         continued supervised: acc {results['sft_continued']:.3f}")
+        sft_arm = LotusTrainer(cfg, tok, mcfg)
+        sft_arm.reasoner.load_state_dict(snapshot)
+        for s in range(sft_steps, sft_steps + rl_steps):
+            sft_arm._train_step(s)
+        results["sft_continued"] = evaluate(
+            LatentPolicy(sft_arm.reasoner, use_switch=False).to(device),
+            held, tok, verifier, max_len, device)
+        print(f"  [arm sft]         continued supervised: acc {results['sft_continued']:.3f}")
 
     # Arms 2 and 3: GRPO, with and without the switch action.
     rng = random.Random(cfg.seed + 7)
@@ -342,7 +342,13 @@ def run_experiment(cfg: LotusConfig, tok: ArithmeticTokenizer, mcfg: ModelConfig
         opt = torch.optim.AdamW(policy.parameters(), lr=rl_lr, weight_decay=0.0)
         last: Dict[str, float] = {}
         for s in range(rl_steps):
-            tasks = [base.grammar.sample_with_trace(base.descriptor, rng.randint(0, 2 ** 31 - 1))
+            # Train the policy on the training partition only. Drawing from the
+            # whole space put the RL arms' own evaluation problems in their
+            # rollouts, which biases every arm upward -- harmlessly for the
+            # negative result this experiment reported, but it is still wrong.
+            tasks = [base.grammar.sample_with_trace(base.descriptor,
+                                                    rng.randint(0, 2 ** 31 - 1),
+                                                    exclude_heldout=True)
                      for _ in range(rl_problems)]
             last = grpo_step(policy, ref, tok, verifier, [e for e, _, _ in tasks], opt,
                              group_size, temperature, kl_coef, max_len, device,

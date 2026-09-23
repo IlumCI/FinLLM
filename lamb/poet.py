@@ -101,13 +101,18 @@ class POETTrainer:
         return {m.env for m in self.population}
 
     def _batch(self, env: Descriptor, n: int):
-        examples = [self.tok.encode(*self.grammar.sample(env, self._next_seed())) for _ in range(n)]
+        examples = [self.tok.encode(*self.grammar.sample(env, self._next_seed(),
+                                                         exclude_heldout=True))
+                    for _ in range(n)]
         return collate(examples, self.tok.PAD, device=self.cfg.device)
 
     @torch.no_grad()
     def _score(self, agent: LAMb, env: Descriptor, n: Optional[int] = None) -> float:
         n = n or self.cfg.eval_tasks
-        tasks = [self.grammar.sample(env, self._next_seed()) for _ in range(n)]
+        # Score on held-out problems. Scoring on the ones the agent trained on
+        # makes this fitness a memorisation measure, and POET *selects* on it --
+        # so the contamination would not just misreport, it would steer search.
+        tasks = [self.grammar.sample_heldout(env, self._next_seed()) for _ in range(n)]
         preds = agent.solve([p for p, _ in tasks], self.tok, max_answer_len=self._answer_len, device=self.cfg.device)
         ok = sum(1 for (_, a), pr in zip(tasks, preds) if pr is not None and pr == a)
         return ok / max(1, n)

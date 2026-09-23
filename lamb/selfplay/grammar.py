@@ -129,6 +129,24 @@ class TaskGrammar:
                 return expr, str(a + b)
         return expr, str(a + b)
 
+    def sample_heldout(self, descriptor: Descriptor, seed: int,
+                       tries: int = 256) -> Tuple[str, str]:
+        """A problem drawn from the **evaluation** partition.
+
+        The mirror of ``sample(..., exclude_heldout=True)``: training rejects this
+        partition and evaluation draws only from it, so the two never meet however
+        long training runs. Falls back to an unfiltered draw only if the descriptor's
+        space is so small that the partition is effectively empty.
+        """
+        rng = random.Random(seed)
+        last = self.sample(descriptor, seed)
+        for _ in range(tries):
+            expr, ans = self.sample(descriptor, rng.randint(0, 2 ** 31 - 1))
+            last = (expr, ans)
+            if is_heldout(expr):
+                return expr, ans
+        return last
+
     def max_answer_len(self, max_depth: int, max_digits: int) -> int:
         # Generous upper bound on answer token length across the reachable space.
         return min(24, 2 + max_digits * (2 ** min(max_depth, 3)))

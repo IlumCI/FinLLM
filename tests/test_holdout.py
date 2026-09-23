@@ -73,3 +73,81 @@ def test_eval_set_is_bounded_on_a_tiny_partition():
     got = ev.sample(100)
     assert len(got) == 100
     assert all(is_heldout(s[3]) for s in got)
+
+
+def test_population_comm_trains_and_evaluates_on_disjoint_problems():
+    """comm_pop holds out *pairings*; it must also hold out *problems*.
+
+    Holding out only the ``(i, i)`` pairings measures a zero-shot partner on
+    problems the population trained on, which is not the zero-shot-coordination
+    question it claims to answer.
+    """
+    from lamb import ArithmeticTokenizer, CommConfig
+    from lamb.comm_pop import PopulationComm
+
+    cfg = CommConfig(steps=2, batch_size=8, pop_speakers=2, pop_listeners=2, device="cpu")
+    pc = PopulationComm(cfg, ArithmeticTokenizer())
+    train = {s[3] for _ in range(40) for s in pc.task.sample(32)}
+    ev = {s[3] for s in pc._eval_set(256)}
+    assert train and ev
+    assert not (train & ev)
+
+
+def test_comm_sampler_tops_up_without_recursing_into_its_own_padding():
+    """A split that merely needs more draws must not be padded with duplicates."""
+    from lamb.comm import CommTask
+
+    from collections import Counter
+
+    train = CommTask(2, 2, ("+", "-"), 0, split="train")
+    got = train.sample(256)
+    assert len(got) == 256
+    # The 2-digit training partition holds ~13.7k problems, so 256 i.i.d. draws
+    # collide a couple of times by the birthday effect and no more. The bug this
+    # guards against padded the tail by *cycling* a short prefix, which shows up as
+    # a low distinct count and a high multiplicity, not as a couple of collisions.
+    counts = Counter(s[3] for s in got)
+    assert len(counts) >= 245, len(counts)
+    assert max(counts.values()) <= 3, counts.most_common(3)
+
+
+def test_long_context_benchmarks_do_not_need_a_hash_partition():
+    """The contamination problem was the *arithmetic grammar*, not seed separation.
+
+    The needle/RULER generators draw from a combinatorial space of episodes so
+    large that two seed-separated streams never collide -- unlike the depth-2
+    1-digit grammar's 80k expressions, where a single run covered 80% of the space.
+    Pinning this keeps the lesson from being over-generalised into a rewrite of
+    benchmarks that were never affected.
+    """
+    import random
+
+    import torch
+
+    from lamb.memory_bench import RecallConfig, RecallTask
+    from lamb.ruler_bench import RulerConfig, RulerTask
+
+    torch.manual_seed(0)
+
+    def recall_sigs(seed, batches, front):
+        task, rng, out = RecallTask(RecallConfig()), random.Random(seed), set()
+        for _ in range(batches):
+            b, y = task.batch(32, 48, 8, rng, front=front)
+            for i in range(32):
+                out.add((tuple(b["key_ids"][i].tolist()), tuple(b["val_ids"][i].tolist()),
+                         tuple(b["kind"][i].tolist()), int(y[i])))
+        return out
+
+    def ruler_sigs(seed, batches, front):
+        task, rng, out = RulerTask(RulerConfig()), random.Random(seed), set()
+        for _ in range(batches):
+            b, y = task.generate(32, 64, 3, 8, rng, front=front)
+            for i in range(32):
+                out.add((tuple(b["kind"][i].tolist()), tuple(b["lhs"][i].tolist()),
+                         tuple(b["rhs"][i].tolist()), int(y[i])))
+        return out
+
+    for train, ev in ((recall_sigs(0, 40, False), recall_sigs(999, 10, True)),
+                      (ruler_sigs(0, 40, False), ruler_sigs(999, 10, True))):
+        assert len(train) > 1000 and len(ev) > 250
+        assert not (train & ev)
