@@ -380,3 +380,83 @@ class ResidueAlgebra:
         """The same composition on exact integers -- the oracle the tests check."""
         enc = lambda v: self.sys.onehot([v], self.device)              # noqa: E731
         return self.sys.decode(self.compose(enc(a), enc(b), op, logits=False))[0]
+
+
+class RedundantResidueSystem(ResidueSystem):
+    """A residue system carrying more moduli than its value range needs.
+
+    CRT has no locality: one wrong residue does not give a nearby number, it gives
+    an essentially uniform one. That makes an answer's accuracy roughly the
+    per-residue accuracy raised to the number of moduli, which is the single
+    harshest constraint on this whole representation -- at the 0.985 per-residue
+    accuracy measured in ROADMAP 3a-vi, seven moduli give 0.900.
+
+    The classical fix costs nothing but width. Size the *core* moduli so legitimate
+    values occupy only part of the ring, and carry extra **redundant** moduli. A
+    corrupted residue throws the reconstruction essentially uniformly over the full
+    ring, so it lands outside the legitimate range and is **detected**. And because
+    the surviving moduli still over-determine the value, dropping each in turn and
+    reconstructing identifies *which* residue was wrong and recovers the value
+    exactly -- so a single error is **corrected**, taking 0.900 to 0.996.
+
+    None of this is learned, and none of it needs a label. It is a property of the
+    code, which is what makes it usable at inference on a benchmark that has no
+    verifier -- the case an exact checker cannot reach.
+    """
+
+    def __init__(self, moduli: Tuple[int, ...], n_core: int):
+        super().__init__(moduli)
+        if not 0 < n_core < len(moduli):
+            raise ValueError("n_core must leave at least one redundant modulus")
+        object.__setattr__(self, "n_core", n_core)
+
+    @property
+    def core(self) -> Tuple[int, ...]:
+        return self.moduli[:self.n_core]
+
+    @property
+    def redundant(self) -> Tuple[int, ...]:
+        return self.moduli[self.n_core:]
+
+    @property
+    def legit(self) -> int:
+        """Half-width of the range legitimate values may occupy."""
+        return reduce(lambda a, b: a * b, self.core, 1) // 2
+
+    # -- reconstruction over an arbitrary subset --------------------------
+    def _crt_subset(self, res: Sequence[int], keep: Sequence[int]) -> int:
+        mods = [self.moduli[i] for i in keep]
+        M = reduce(lambda a, b: a * b, mods, 1)
+        x = 0
+        for i, p in zip(keep, mods):
+            Mi = M // p
+            x += (res[i] % p) * Mi * _inv(Mi, p)
+        x %= M
+        return x - M if x > M // 2 else x
+
+    def detect(self, res: Sequence[int]) -> bool:
+        """True if the residues cannot describe a legitimate value."""
+        return abs(self.crt(res)) > self.legit
+
+    def correct(self, res: Sequence[int]) -> Tuple[Optional[int], Optional[int]]:
+        """``(value, faulty modulus index)``.
+
+        ``(value, None)`` means no error was detected. ``(value, k)`` means modulus
+        ``k`` was wrong and the value is the corrected one. ``(None, None)`` means
+        the residues are inconsistent in a way one error cannot explain -- two or
+        more are wrong -- which is reported rather than guessed at, because a
+        confidently wrong number is worse than an admitted failure.
+        """
+        x = self.crt(res)
+        if abs(x) <= self.legit:
+            return x, None
+        all_idx = range(len(self.moduli))
+        candidates = []
+        for k in all_idx:
+            y = self._crt_subset(res, [i for i in all_idx if i != k])
+            if abs(y) <= self.legit:
+                candidates.append((y, k))
+        # More than one explanation means the evidence does not single out a culprit.
+        if len(candidates) == 1:
+            return candidates[0]
+        return None, None

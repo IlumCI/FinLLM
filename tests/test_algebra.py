@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import random
 
+import pytest
 import torch
 
 from lamb.algebra import DEFAULT_MODULI, ResidueAlgebra, ResidueSystem, order10
@@ -79,8 +80,6 @@ def test_default_moduli_have_short_digit_coefficient_periods():
 
 
 def test_moduli_must_be_coprime():
-    import pytest
-
     with pytest.raises(ValueError):
         ResidueSystem((4, 6))
 
@@ -137,3 +136,73 @@ def test_half_precision_inputs_do_not_corrupt_the_result():
         A, B = s.onehot([a]).half(), s.onehot([b]).half()
         want = {"+": a + b, "-": a - b, "*": a * b}[op]
         assert s.decode(alg.compose(A, B, op, logits=False)) == [want]
+
+
+def _rrns(n_redundant=3):
+    from lamb.algebra import RedundantResidueSystem
+    return RedundantResidueSystem((16, 25, 27, 11) + (37, 7, 41, 101)[:n_redundant],
+                                  n_core=4)
+
+
+def test_detection_catches_every_single_residue_error():
+    """CRT has no locality, so a corrupted residue lands essentially uniformly over
+    the ring and therefore outside the legitimate range."""
+    s = _rrns()
+    rng = random.Random(0)
+    for _ in range(2000):
+        v = rng.randint(-s.legit, s.legit)
+        res = s.residues(v)
+        assert not s.detect(res)                      # clean values never flagged
+        k = rng.randrange(len(s.moduli))
+        res[k] = (res[k] + rng.randint(1, s.moduli[k] - 1)) % s.moduli[k]
+        assert s.detect(res)
+
+
+def test_single_errors_are_corrected_exactly_with_enough_redundancy():
+    """Dropping each modulus in turn identifies the culprit, because the survivors
+    still over-determine the value. This takes answer accuracy from q**K to
+    q**K + K*q**(K-1)*(1-q) -- at the measured q=0.985 and K=7, 0.900 to 0.996."""
+    s = _rrns(3)
+    rng = random.Random(1)
+    for _ in range(1500):
+        v = rng.randint(-s.legit, s.legit)
+        res = s.residues(v)
+        k = rng.randrange(len(s.moduli))
+        res[k] = (res[k] + rng.randint(1, s.moduli[k] - 1)) % s.moduli[k]
+        val, faulty = s.correct(res)
+        assert val == v and faulty == k
+
+
+def test_the_failure_mode_is_refusal_not_a_wrong_answer():
+    """Under-provisioned redundancy loses corrections but must never invent one: a
+    confidently wrong number is worse than an admitted failure, and this whole
+    representation is being used precisely where no verifier can catch it."""
+    s = _rrns(2)                                      # deliberately too few
+    rng = random.Random(2)
+    refused = corrected = 0
+    for _ in range(1500):
+        v = rng.randint(-s.legit, s.legit)
+        res = s.residues(v)
+        k = rng.randrange(len(s.moduli))
+        res[k] = (res[k] + rng.randint(1, s.moduli[k] - 1)) % s.moduli[k]
+        val, _ = s.correct(res)
+        if val is None:
+            refused += 1
+        else:
+            assert val == v                           # never a wrong value
+            corrected += 1
+    assert refused > 0 and corrected > 0              # it does lose some
+
+
+def test_clean_residues_are_returned_untouched():
+    s = _rrns()
+    for v in (0, 1, -1, 12345, -59_400):
+        val, faulty = s.correct(s.residues(v))
+        assert val == v and faulty is None
+
+
+def test_n_core_must_leave_redundancy():
+    from lamb.algebra import RedundantResidueSystem
+
+    with pytest.raises(ValueError):
+        RedundantResidueSystem((16, 25, 27), n_core=3)

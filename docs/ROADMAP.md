@@ -723,6 +723,47 @@ Two things this does not solve, recorded rather than left implicit:
   the right trade, since the path is launch-bound by four orders of magnitude; on CPU
   it is not, and the per-modulus loop remains available.
 
+### 3a-ix. Redundant residues: correcting errors, not just detecting them
+
+The harshest constraint on the residue representation is that **CRT has no
+locality**. One wrong residue does not give a nearby number, it gives an essentially
+uniform one, so an answer's accuracy is roughly the per-residue accuracy raised to
+the number of moduli. At the 0.985 per-residue accuracy measured in 3a-vi, seven
+moduli give **0.900** — a 10% error rate produced entirely by the encoding, on top
+of whatever the model gets wrong.
+
+The classical fix costs width and nothing else. Size the **core** moduli so
+legitimate values occupy only part of the ring and carry extra **redundant** ones.
+A corrupted residue throws the reconstruction outside the legitimate range, so it is
+detected; and because the survivors still over-determine the value, dropping each
+modulus in turn identifies *which* residue was wrong and recovers the value exactly.
+
+    q**K                      -> detection only
+    q**K + K q**(K-1) (1-q)   -> single error corrected
+
+At the measured `q = 0.985`, `K = 7`: **0.900 → 0.996**, a 25× reduction in error
+rate. Nothing is learned and no label is required, which is what makes it usable at
+inference on a benchmark with no verifier — the case an exact checker cannot reach.
+
+Measured over 4,000 single-residue corruptions per row, core `(16,25,27,11)`:
+
+| redundant moduli | units | corrected | refused | **mis-corrected** | 2-error silent |
+| --- | --- | --- | --- | --- | --- |
+| `(37,7)` | 123 | 84.3% | 15.7% | **0.00%** | 33.5% |
+| `(37,7,41)` | 164 | **100.0%** | 0.0% | **0.00%** | 0.1% |
+| `(37,7,41,101)` | 265 | 100.0% | 0.0% | **0.00%** | 0.0% |
+
+Three redundant moduli is the sizing: full correction of single errors, and two
+simultaneous errors go silent only 0.1% of the time.
+
+**The column that matters is mis-correction, and it is zero throughout.** Under-
+provisioned redundancy loses corrections — it never invents one. When the evidence
+does not single out a culprit, `correct` returns `None` rather than picking the most
+plausible candidate. That is deliberate: this representation is being used precisely
+where nothing downstream can catch a wrong answer, so the failure mode has to be an
+admitted failure rather than a confident number. It is the same reasoning that made
+out-of-range values masked rather than clipped in 3a-vi.
+
 ## 3b. Latent inter-agent communication (Coconut) — Stage B implemented
 
 Implemented in `lamb/comm.py` (`python -m lamb.comm`). The message passed between
