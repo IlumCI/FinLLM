@@ -73,13 +73,16 @@ def test_soft_execution_with_sharp_logits_equals_hard_execution():
         answers.append(int(a))
     golds = [gold_program(t)[0] for t in trees]
     n_op, n_instr = 4, 3
+    n_slots = n_op + n_instr
     B = len(trees)
-    regs = RegisterFile(s, [operands(t) for t in trees])
+    # The file is preallocated to its final width and pointers span all of it;
+    # slots past the written tail are zero, which is what the causal mask produces
+    # in the learned path.
+    regs = RegisterFile(s, [operands(t) for t in trees], n_total=n_slots)
     for step in range(n_instr):
-        n_now = n_op + step
         op_l = torch.full((B, len(OPS)), -30.0)
-        a_l = torch.full((B, n_now), -30.0)
-        b_l = torch.full((B, n_now), -30.0)
+        a_l = torch.full((B, n_slots), -30.0)
+        b_l = torch.full((B, n_slots), -30.0)
         for i, gp in enumerate(golds):
             o, ra, rb = gp[step]
             op_l[i, o] = 30.0
@@ -182,3 +185,48 @@ def test_evaluation_separates_program_correctness_from_answer_correctness():
     r = tr.evaluate(32)
     for k in ("answer_acc", "instr_acc", "program_acc", "op_acc", "ptr_acc"):
         assert 0.0 <= r[k] <= 1.0
+
+
+def test_register_file_width_is_static():
+    """Appending with torch.cat changes the shape every instruction, and a changing
+    shape is the one thing compilers cannot fuse across -- XLA requires static
+    shapes outright, and TorchInductor traces it but cannot fuse over the boundary.
+    On a workload this launch-bound, losing fusion costs more than preallocating."""
+    s = ResidueSystem((16, 25, 27, 11, 37))
+    g = TaskGrammar()
+    trees = [parse_expr(g.sample_with_trace(Descriptor(2, 1, 0), i)[0]) for i in range(6)]
+    vals = [operands(t) for t in trees]
+    rm = RegisterMachine(d_model=16, n_operands=4, n_instr=3, system=s)
+    regs = RegisterFile(s, vals, n_total=rm.n_slots)
+    shapes = [tuple(regs.packed.shape)]
+    for _ in range(3):
+        regs.append(torch.zeros(6, len(s.moduli), max(s.moduli)))
+        shapes.append(tuple(regs.packed.shape))
+    assert len(set(shapes)) == 1, shapes            # identical throughout
+    assert shapes[0][1] == rm.n_slots
+
+
+def test_unwritten_registers_hold_nothing():
+    """A preallocated slot must not read as a value, or a pointer into the tail
+    would silently contribute a spurious operand."""
+    s = ResidueSystem((16, 25, 27, 11, 37))
+    regs = RegisterFile(s, [[1, 2, 3, 4]], n_total=7)
+    assert float(regs.packed[0, 4:].sum()) == 0.0
+    assert abs(float(regs.packed[0, 0].sum()) - len(s.moduli)) < 1e-4   # written: 1 per modulus
+
+
+def test_the_whole_machine_traces_as_one_graph():
+    """Zero graph breaks is what makes torch.compile worth reaching for here, and
+    is also the evidence that a JAX rewrite would not buy fusion this does not
+    already have."""
+    import torch._dynamo as dynamo
+
+    s = ResidueSystem((16, 25, 27, 11, 37))
+    g = TaskGrammar()
+    vals = [operands(parse_expr(g.sample_with_trace(Descriptor(2, 1, 0), i)[0]))
+            for i in range(4)]
+    rm = RegisterMachine(d_model=16, n_operands=4, n_instr=3, system=s)
+    dynamo.reset()
+    ex = dynamo.explain(lambda x: rm.run(x, vals)[0].packed)(torch.randn(4, 3, 16))
+    assert ex.graph_break_count == 0
+    assert ex.graph_count == 1

@@ -101,7 +101,7 @@ class RegisterFile:
 
     def __init__(self, sysm: ResidueSystem, values: Sequence[Sequence[int]],
                  device: str = "cpu", sharp: float = 30.0,
-                 alg: "Optional[ResidueAlgebra]" = None):
+                 alg: "Optional[ResidueAlgebra]" = None, n_total: Optional[int] = None):
         self.sys = sysm
         self.alg = alg or ResidueAlgebra(sysm, device=device)
         b, n = len(values), len(values[0])
@@ -113,12 +113,30 @@ class RegisterFile:
         # against a 5-10 us launch. Packing pays ~70% wasted arithmetic and about
         # 5x the intermediate memory -- 10 MB rather than 2 at batch 256, nothing on
         # any real card -- to cut the kernel count by 7-9x along the hot path.
-        self.packed = torch.full((b, n, len(sysm.moduli), P), -sharp, device=device)
+        # The register file is **preallocated** to its final width and never grows.
+        #
+        # Appending with torch.cat changes the shape on every instruction, and a
+        # changing shape is the one thing compilers cannot fuse across: XLA requires
+        # static shapes outright and would recompile per length, and TorchInductor
+        # traces it but cannot fuse over the boundary. Since the whole workload is
+        # launch-bound -- the arithmetic in a composition is ~0.001 us against a
+        # 5-10 us launch -- losing fusion is the expensive part, not the allocation.
+        #
+        # Writes are out-of-place against a slot indicator rather than in-place
+        # assignment, which keeps the shape static *and* keeps autograd happy; an
+        # in-place write into a tensor on the graph trips the version counter.
+        self.n_total = n_total if n_total is not None else n
+        self.n_filled = n
+        full = torch.full((b, self.n_total, len(sysm.moduli), P), -sharp, device=device)
         for i, row in enumerate(values):
             for j, v in enumerate(row):
                 for k, p in enumerate(sysm.moduli):
-                    self.packed[i, j, k, int(v) % p] = sharp
-        self.packed = torch.softmax(self.packed, dim=-1) * self._valid(device)
+                    full[i, j, k, int(v) % p] = sharp
+        self.packed = torch.softmax(full, dim=-1) * self._valid(device)
+        if self.n_total > n:                      # unwritten slots hold nothing
+            keep = torch.zeros(self.n_total, 1, 1, device=device)
+            keep[:n] = 1.0
+            self.packed = self.packed * keep
 
     def _valid(self, device) -> torch.Tensor:
         return self.alg._tables(torch.device(device))[3]        # (K, P) padding mask
@@ -129,8 +147,11 @@ class RegisterFile:
         return [self.packed[..., k, :p] for k, p in enumerate(self.sys.moduli)]
 
     def append(self, new: torch.Tensor) -> None:
-        """``new`` is packed ``(B, K, P)``."""
-        self.packed = torch.cat([self.packed, new.unsqueeze(1)], dim=1)
+        """Write ``new`` ``(B, K, P)`` into the next slot, keeping the shape fixed."""
+        slot = torch.zeros(self.n_total, 1, 1, device=new.device, dtype=new.dtype)
+        slot[self.n_filled] = 1.0
+        self.packed = self.packed + slot * new.unsqueeze(1)
+        self.n_filled += 1
 
     def read(self, ptr: torch.Tensor) -> torch.Tensor:
         """Pointer-weighted mixture over registers. ``ptr`` ``(B, R)`` -> ``(B, K, P)``."""
@@ -181,11 +202,13 @@ def run_gold(sysm: ResidueSystem, alg: ResidueAlgebra, trees: Sequence[Tree],
     progs = [gold_program(t) for t in trees]
     n_op = progs[0][1]
     n_instr = len(progs[0][0])
-    regs = RegisterFile(sysm, [operands(t) for t in trees], device)
+    n_slots = n_op + n_instr                      # the file's final, fixed width
+    regs = RegisterFile(sysm, [operands(t) for t in trees], device, n_total=n_slots)
     b = len(trees)
     for step in range(n_instr):
         op_w = torch.zeros(b, len(OPS), device=device)
-        n_slots = n_op + step
+        # Pointers span the whole file; slots past the written tail are simply zero,
+        # which is what the causal mask produces in the learned path too.
         pa = torch.zeros(b, n_slots, device=device)
         pb = torch.zeros(b, n_slots, device=device)
         for i, (instrs, _, _) in enumerate(progs):
@@ -251,12 +274,15 @@ class RegisterMachine(nn.Module):
         being tested is whether it can emit the right *program*.
         """
         op_l, a_l, b_l = self.logits(latent_h)
-        regs = RegisterFile(self.sys, values, str(latent_h.device))
+        regs = RegisterFile(self.sys, values, str(latent_h.device),
+                            n_total=self.n_slots)
         for t in range(self.n_instr):
-            n_now = self.n_operands + t
+            # Softmax over the *full* register file rather than a slice. The causal
+            # mask is already -inf past the written tail, so those entries come out
+            # exactly zero -- same result, static shape.
             ow = self._select(op_l[:, t], tau, hard)
-            pa = self._select(a_l[:, t, :n_now], tau, hard)
-            pb = self._select(b_l[:, t, :n_now], tau, hard)
+            pa = self._select(a_l[:, t], tau, hard)
+            pb = self._select(b_l[:, t], tau, hard)
             regs.append(execute(self.alg, regs, ow, pa, pb))
         return regs, (op_l, a_l, b_l)
 
