@@ -55,6 +55,8 @@ python -m lamb.coconut                         # Coconut continuous-thought reas
 python -m lamb.lotus                           # Stage A restructured: parallel supervised latents (the scalable family)
 python -m lamb.lotus --trace-coef 0             # ablation: parallel latents, answer-only supervision
 python -m lamb.latent_rl                       # does on-policy RL move the latent block? (measured: no)
+python -m lamb.study --task d2g1               # paired multi-seed comparison of the Stage A arms, with error bars
+python -m lamb.study --task d2g2 --seeds 5      # ...on a space too large to memorise (5.2e8 expressions)
 python -m lamb.comm                            # latent inter-agent communication: message = a thought vector (Stage B)
 python -m lamb.comm --sweep                     # channel-bandwidth (capacity) sweep with DRU noise
 python -m lamb.comm_transfer                     # held-out-partner test: is the latent code private or shareable?
@@ -127,7 +129,9 @@ lamb/                     Python package (torch)
     league.py             Red Queen: solver league + relative-fitness metrics
     verifier.py           exact reward oracle (wraps the Rust kernels)
     loop.py               Absolute-Zero-style self-play trainer
+  holdout.py              train/eval partition of the *problem space* (hash, not seed)
   eval.py                 held-out accuracy, length generalization, test-time scaling
+  study.py                paired multi-seed arm comparison: exact permutation tests, power
   coconut.py              Coconut continuous-thought reasoning + verifier-selected best-of-N (Stage A)
   lotus.py                Stage A restructured: parallel supervised latent block (scales where Coconut doesn't)
   comm.py                 latent inter-agent communication: speaker/listener + differentiable channel (Stage B)

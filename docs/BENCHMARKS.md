@@ -51,12 +51,21 @@ reversed vs. forward digits and Abacus on/off to attribute the gains.
   together (cost `loops+1` forwards independent of latent count) and every latent
   position is supervised through the LM head against a gold **numeric** trace the
   evaluator generates for free. Nothing latent is ever decoded. Measured at matched
-  budget on depth-2 nested expressions:
-  `Coconut 0.512 → LOTUS answer-only 0.695 → LOTUS +trace 0.945`, trace-probe
-  `0.98` vs `0.10` at chance, on a hash-partitioned held-out set (`lamb/holdout.py`;
-  the earlier seed-separated split was 53% contaminated). The SWITCH **entry**
-  boundary (arXiv:2606.13106) showed **no measurable effect** once the eval was clean
-  (0.945 without vs 0.934 with) and its RL rationale was falsified, so it is off by
+  forward-pass budget on depth-2 nested expressions, **5 seeds per arm**
+  (`python -m lamb.study --task d2g1`):
+  `Coconut 0.504 ± 0.062 → LOTUS answer-only 0.826 ± 0.034 → LOTUS +trace 0.903 ±
+  0.024`, trace-probe `0.97` vs `0.14` at chance, on a hash-partitioned held-out set
+  (`lamb/holdout.py`; the earlier seed-separated split was 53% contaminated). Only
+  the **structural** step is established: the two arms' seed ranges are *disjoint*
+  (worst LOTUS 0.746 > best Coconut 0.703; exact permutation *p* = 0.008). The trace
+  step (+7.7) is positive on all 5 seeds but *p* = 0.064 — suggestive, not shown.
+  Variance also falls with each change (sd 0.138 → 0.076 → 0.054), which matters on
+  a baseline that swings 39 points on seed alone. Single-run figures previously
+  reported here (0.512/0.695/0.945) could not have distinguished any of this: at
+  Coconut's spread, ~61 seeds are needed to resolve a 5-point difference. The SWITCH
+  **entry** boundary (arXiv:2606.13106) showed **no measurable effect** once the eval
+  was clean (0.945 without vs 0.934 with), its RL rationale was falsified, and its
+  claimed +5.9 was always below what a single run can resolve — so it is off by
   default. The *exit* marker is measurably harmful and off by
   default (500-step control: no-boundary `0.371`, `BOT`+`EOT` `0.176`, `BOT`-only
   `0.500`): a static marker between the latents and the answer readout blocks the
@@ -91,6 +100,8 @@ reversed vs. forward digits and Abacus on/off to attribute the gains.
     (3 speakers × 3 listeners) trained with random pairing and the diagonal `(i,i)`
     pairings held out reaches held-out **zero-shot `1.000`** (up from the single
     pair's `0.004` swap): partner randomization makes the code canonical.
+    **Unconfirmed**: this was measured before `comm_pop.py` held out *problems* as
+    well as pairings, so it is pending a re-run on the clean split (ROADMAP 3b).
   Covered by `tests/test_comm.py`.
 - **ProntoQA / ProsQA** — the synthetic logical-reasoning sets Coconut used to
   show latent breadth-first reasoning beats token chain-of-thought. These need a

@@ -164,24 +164,44 @@ cliff), while the **looped, parallel-supervised** family stays flat (−1.5 at 3
 - **Still a blackbox.** Latent positions are never decoded; only the answer is
   emitted. The trace is a training signal, not an output.
 
-Measured on depth-2 nested expressions at matched budget (1000 steps, batch 64,
-0.28M params), decomposing the two changes:
+Measured on depth-2 nested expressions at matched forward-pass budget (1000 steps,
+batch 64, 0.28M params), **over 5 seeds per arm** (`python -m lamb.study --task d2g1`),
+decomposing the two changes:
 
-| arm | structure | supervision | answer acc | trace-probe |
-| --- | --- | --- | --- | --- |
-| Coconut (Stage A original) | sequential | answer-only | 0.512 | — |
-| LOTUS | **parallel** | answer-only | **0.695** | 0.102 (chance) |
-| LOTUS | parallel | **+ per-position trace** | **0.945** | 0.976 |
+| arm | structure | supervision | answer acc (mean ± sem, n=5) | sd | range | trace-probe |
+| --- | --- | --- | --- | --- | --- | --- |
+| Coconut (Stage A original) | sequential | answer-only | 0.504 ± 0.062 | 0.138 | 0.316–0.703 | — |
+| LOTUS | **parallel** | answer-only | **0.826 ± 0.034** | 0.076 | 0.746–0.910 | 0.14 (chance) |
+| LOTUS | parallel | **+ per-position trace** | **0.903 ± 0.024** | 0.054 | 0.811–0.951 | 0.97 |
 
-Structure alone is worth **+18.3 pts** at identical supervision; the per-position
-trace adds **+25.0** more (0.512 → 0.945). These are re-measured on a *clean*
-held-out partition (see below); the first reported numbers (0.520/0.707/0.875) came
-from a seed-separated eval set that was 53% contaminated. The trace-probe (a
-diagnostic, never decoded) confirms the latent block really does carry the
-intermediates: 0.95 with supervision vs chance without. Note the third arm uses
-information the first two do not — the gold trace — which is free here only because
-an exact verifier exists; the second arm is the matched-supervision control, and it
-already beats Coconut.
+- **Structure is worth +32.3 pts** at identical supervision, and it is the one
+  result here that a 5-seed study can actually establish: the two arms' seed ranges
+  are **disjoint** — the worst LOTUS run (0.746) beats the best Coconut run (0.703) —
+  which is an exact permutation *p* = 0.0079. It also costs nothing extra: no gold
+  trace, no new information, just the parallel block in place of the sequential one.
+- **The per-position trace adds +7.7 pts, and that is *not* established at n=5.**
+  Exact permutation *p* = 0.064; the paired sign-flip test cannot go below 0.0625
+  with 5 seeds however large the effect, and it sits exactly there (all 5 seeds
+  positive). Suggestive, consistent in sign, unproven. This is a large correction:
+  the single-run numbers said +25.0.
+- **Variance falls with each change** — sd 0.138 → 0.076 → 0.054. Given that the
+  Coconut baseline swings 39 points on seed alone, making training *reliable* is
+  arguably worth as much as the mean gain, and it is the less obvious result.
+
+Earlier reported figures for these arms were 0.512 / 0.695 / 0.945, each a **single
+run**. Two things were wrong with that. The eval set was 53% contaminated (fixed in
+3a-iii below), and — the larger error — one run cannot separate an effect from seed
+noise at this scale. At Coconut's spread, **61 seeds** would be needed to resolve a
+5-point difference; nothing this repo claimed below ~18 points was ever measurable.
+That is the direct explanation for the SWITCH boundary saga in 3a-i: its claimed
++5.9 was noise from the start, and no amount of care in *running* that single
+experiment could have revealed it.
+
+The trace-probe (a diagnostic, never decoded) confirms the latent block really does
+carry the intermediates: 0.97 with supervision, chance (0.14) without. Note the
+third arm uses information the first two do not — the gold trace — free here only
+because an exact verifier exists; the second arm is the matched-supervision control,
+and it is the one that carries the result.
 
 Refs: LOTUS ([2606.31779](https://arxiv.org/abs/2606.31779)); SIM-CoT
 ([2509.20317](https://arxiv.org/abs/2509.20317)); looped transformers
@@ -204,9 +224,11 @@ probes to attach to.
 
 **The accuracy claim for this did not survive.** It was first measured as
 0.875 → 0.934 (+5.9) on a contaminated eval set. On the clean held-out partition the
-comparison is 0.945 without the boundary vs 0.934 with it — the sign flips, and both
-differences sit inside a run-to-run spread of several points. The honest reading is
-**no measurable effect**. Together with 3a-ii (its RL rationale falsified), the entry
+comparison is 0.945 without the boundary vs 0.934 with it — the sign flips. The
+multi-seed study in 3a-iv then explained *why* both numbers were meaningless: at
+this model's seed-to-seed spread, a 5-point difference needs ~61 seeds to resolve,
+so a single run could never have detected a real +5.9 nor ruled one out. The honest
+reading is **no measurable effect, and no measurement**. Together with 3a-ii (its RL rationale falsified), the entry
 boundary is therefore **off by default**: it costs a sequence position and two
 vocabulary ids for nothing demonstrated. It is kept opt-in (`use_boundaries=True`)
 because it remains the only well-defined attachment point for a probe or an RL
@@ -304,15 +326,139 @@ grammar, Coconut, LOTUS and comm streams.
 Effect on the results: the LOTUS restructure held up almost unchanged
 (0.520→0.512, 0.707→0.695) and the trace arm improved (0.875→0.945) — a 0.28M model
 on 44k problems cannot memorise much, so it was largely generalising already. The
-boundary claim did **not** hold up (3a-i). One further lesson: the same nominal
-config moved ~7 points across two runs differing only in the eval partition, which
-puts a floor under how large an effect has to be before it means anything here.
+boundary claim did **not** hold up (3a-i).
 
-For Stage B the partition is real but small (~22 of 200 problems at 1 digit), so
-the comm accuracy is best read as a *channel* test — the listener never sees `X`, so
-it cannot answer from memorisation without the message — rather than a
-generalisation test. `--a-digits 2` gives a 20k-problem space if a generalisation
-claim is wanted.
+**The first pass at this fix was incomplete**, which is worth recording because the
+incompleteness was invisible from the tests that were written for it. Only the
+Stage A and Stage B trainers were wired to the partition. A later sweep of every
+problem-sampling call site found four more that still drew from the whole space:
+
+- `lamb/comm_pop.py` — the population trainer *and* its eval set. It holds out
+  *pairings* `(i, i)`, which is the zero-shot-coordination question, and that was
+  mistaken for holding out problems. The partner-randomization result was measured
+  on problems the population had trained on.
+- `lamb/latent_rl.py` — the GRPO rollouts drew the arms' own evaluation problems.
+  Harmless to the conclusion there (it was negative, and contamination biases
+  *upward*), but wrong.
+- `lamb/selfplay/loop.py` and `lamb/poet.py` / `lamb/poet_shared.py` — the
+  self-play and POET training samplers, which back the self-improvement claims.
+  POET's `_score` is worse than a misreported number: POET *selects* on it, so
+  scoring on trained problems was steering the search toward memorisation. It now
+  scores on held-out problems.
+- `lamb/eval.py` — the benchmark harness itself, behind the length-generalization
+  numbers, sampled from the whole space.
+
+The scope of the lesson is worth stating too, because the obvious over-correction
+is to distrust seed separation everywhere. It was checked: the needle-retrieval and
+RULER generators draw episodes from a space of ~10<sup>92</sup>, so two
+seed-separated streams have an expected collision count of ~10<sup>-85</sup>, and a
+measured overlap of exactly zero (`tests/test_holdout.py`). Seed separation is fine
+there and those benchmarks needed no change. The problem was never seed separation
+as such — it was seed separation over an **80k-expression space that a single run
+covers 80% of**.
+
+`TaskGrammar.sample_heldout` is the mirror of `sample(..., exclude_heldout=True)`,
+so training rejects a partition that evaluation draws only from, and the two can
+never meet. The lesson is about the shape of the fix rather than the fix: a
+partition is only as good as its *least* careful call site, and a test that asserts
+"these two streams are disjoint" says nothing about the streams nobody thought of.
+The sweep is `grep` over every `sample(` call site, and it is cheap to repeat.
+
+One cost is worth being explicit about, because it is a real trade and not a free
+win. Partitioning a *small* space buys cleanliness at the price of resolution. The
+fixed grid's 1-digit `+` cell holds exactly 100 problems, so its evaluation
+partition is **9**: that per-cell accuracy now has a granularity of ~11 points
+however many samples are drawn. `evaluate()` therefore returns `per_cell_unique`
+alongside `per_cell`, so the resolution is visible in the output rather than
+something the reader has to reconstruct. The answer to a coarse cell is a wider
+cell, not a dirtier split.
+
+For Stage B the partition is real but small — exactly 22 of 200 problems at 1 digit
+(`CommTask.unique_count`), so *any* comm accuracy there has a granularity of ~4.5
+points regardless of how many samples are drawn. The comm accuracy is best read as a
+*channel* test — the listener never sees `X`, so it cannot answer from memorisation
+without the message — rather than a generalisation test. `--a-digits 2` gives 2431
+held-out problems if a generalisation claim is wanted.
+
+### 3a-iv. How many seeds a claim needs — the answer is not one
+
+The contamination above was a bug. The deeper problem was that **every number in
+this repo was a single run**, and at this scale a single run cannot separate an
+effect from seed noise. `lamb/study.py` runs each arm at several seeds and reports
+the paired difference with an exact permutation test rather than an interval, since
+with 5 seeds a normality assumption does more work than the data can support.
+
+What it found on the original setting (`--task d2g1`, 5 seeds, 1000 steps):
+
+| arm | mean ± sem | sd | range |
+| --- | --- | --- | --- |
+| Coconut | 0.504 ± 0.062 | 0.138 | 0.316–0.703 |
+| LOTUS answer-only | 0.826 ± 0.034 | 0.076 | 0.746–0.910 |
+| LOTUS + trace | 0.903 ± 0.024 | 0.054 | 0.811–0.951 |
+
+The **Coconut baseline swings 39 points on seed alone** (0.316 to 0.703). That is
+the number that reframes everything earlier: at that spread, resolving a 5-point
+difference needs ~61 seeds, so no single-run claim below roughly 18 points was ever
+measurable. The SWITCH boundary's +5.9 (3a-i) never had a chance of being real; it
+took two experiments to kill something that a power calculation would have
+predicted was unmeasurable.
+
+One claim grows, one shrinks, and one was not being looked for:
+
+- **Structure: +32.3 pts, established.** The seed ranges are disjoint — the worst
+  LOTUS run beats the best Coconut run — an exact permutation *p* = 0.0079. The
+  single-run estimate had been +18.3, so this was *under*-claimed.
+- **Trace supervision: +7.7 pts, not established.** Positive on all 5 seeds, but
+  *p* = 0.064, and the paired sign-flip test has a floor of 0.0625 at n=5 so it
+  could not have shown significance whatever the effect size. The single-run
+  estimate had been +25.0 — over-claimed by more than 3×.
+- **Variance falls with each change** (0.138 → 0.076 → 0.054). Unplanned, and on a
+  baseline this unstable, arguably the more useful property: the restructure makes
+  training *reliable*, not merely better on average.
+
+The spread above is training variance, not measurement noise: each arm is scored on
+512 held-out problems, so the binomial standard error at these accuracies is ~1.8
+points — an order of magnitude below the 13.8-point seed spread it would have to
+explain. Arms at the same seed also share an eval set, so that component cancels
+from the paired differences entirely.
+
+Known confound, stated rather than buried: the arms are matched on **core forward
+passes** (Coconut's K=3 thoughts + answer = 4; LOTUS's loops=3 + answer = 4) but not
+on wall clock — LOTUS costs 0.564 s/step against Coconut's 0.335 s/step, because its
+sequences carry the latent block. The `coconut-long` arm in `lamb/study.py` is the
+control that removes it, giving Coconut the extra ~1.68× steps instead.
+
+### 3a-v. Latent budget decoupled from trace length; space supervision added
+
+Two design gaps that the multi-seed work made worth closing, both taken from
+mid-2026 results rather than from this repo's own logic:
+
+- **The latent block was a copy of the trace.** One latent position per trace token
+  means the block has to grow with the trace, so a long trace is simply out of
+  reach — and [2607.16972](https://arxiv.org/abs/2607.16972) finds *both*
+  continuous-CoT training regimes collapsing to about a third of explicit-CoT
+  accuracy precisely on long traces. `trace_compress = c` supervises `c` consecutive
+  trace tokens per latent through multi-token-prediction heads
+  ([2404.19737](https://arxiv.org/abs/2404.19737)), so capacity is `n_latent * c`
+  and the two are decoupled. The compression is **generative, not geometric**: C-MTP
+  compresses by averaging the token embeddings a latent stands for, and
+  [2606.20075](https://arxiv.org/abs/2606.20075) finds that rigid geometric
+  compression collapses the reasoning space while generative reconstruction
+  preserves its capacity — so each head decodes its own token and nothing is
+  averaged. `c = 1` builds no extra heads at all, so it is bit-for-bit the previous
+  model.
+- **There was trajectory supervision but no space supervision.**
+  [2606.20075](https://arxiv.org/abs/2606.20075) decomposes process supervision into
+  dense stepwise signal (which the trace loss supplies) and preservation of the
+  latent manifold's structure (which nothing here supplied), and attributes latent
+  drift to the missing second term. `space_coef` adds a supervised-contrastive term
+  ([2004.11362](https://arxiv.org/abs/2004.11362)) over latent positions carrying
+  the same intermediate value. It is deliberately *relational*: pinning each latent
+  to a fixed embedding of its value would be exactly the rigid constraint that
+  analysis warns collapses the space.
+
+Both default to **off**. They are arms to be measured on the harness in 3a-iv, not
+claims — which is the discipline the boundary saga and the RL arm should have had.
 
 ## 3b. Latent inter-agent communication (Coconut) — Stage B implemented
 
@@ -355,8 +501,20 @@ population of `P` speakers and `Q` listeners is trained with random pairing, the
 diagonal `(i, i)` pairings held out of training and evaluated zero-shot. On a 3×3
 CPU population the held-out (never-co-trained) pairings reach zero-shot `1.000`,
 matching trained pairings and up from the single pair's `0.004` swap — the private
-code becomes canonical. Other-Play realized in pure latent space. Remaining:
-larger populations, heterogeneous agent sizes, and cross-architecture transfer.
+code becomes canonical. Other-Play realized in pure latent space.
+
+**Caveat, pending re-measurement.** `comm_pop.py` held out *pairings* but not
+*problems* until the sweep in 3a-iii; it trained and evaluated on the whole space,
+so that `1.000` was measured on problems the population had seen. The zero-shot
+*coordination* claim is about a never-co-trained speaker/listener pair and does not
+obviously depend on problem novelty — but "does not obviously depend on" is not a
+measurement, and this is exactly the kind of reasoning that produced the numbers
+3a-iv had to correct. The number stands until re-run, and is marked as unconfirmed
+until then. Note also that the 1-digit evaluation partition holds 22 problems, so a
+re-run there resolves to ~4.5 points; `--a-digits 2` gives 2431.
+
+Remaining: larger populations, heterogeneous agent sizes, and cross-architecture
+transfer.
 
 Refs: DIAL ([1605.06676](https://arxiv.org/abs/1605.06676)); pitfalls of measuring
 emergent communication ([1903.05168](https://arxiv.org/abs/1903.05168));
