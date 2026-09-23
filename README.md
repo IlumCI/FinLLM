@@ -52,6 +52,8 @@ python -m lamb.poet_shared                    # shared-backbone POET (DoRA adapt
 python -m lamb.memory_bench                   # long-context needle/passkey retrieval (infContext)
 python -m lamb.ruler_bench                     # RULER/BABILong-style suite (NIAH, multi-key, variable tracking)
 python -m lamb.coconut                         # Coconut continuous-thought reasoning + verifier best-of-N (Stage A)
+python -m lamb.lotus                           # Stage A restructured: parallel supervised latents (the scalable family)
+python -m lamb.lotus --trace-coef 0             # ablation: parallel latents, answer-only supervision
 python -m lamb.comm                            # latent inter-agent communication: message = a thought vector (Stage B)
 python -m lamb.comm --sweep                     # channel-bandwidth (capacity) sweep with DRU noise
 python -m lamb.comm_transfer                     # held-out-partner test: is the latent code private or shareable?
@@ -126,6 +128,7 @@ lamb/                     Python package (torch)
     loop.py               Absolute-Zero-style self-play trainer
   eval.py                 held-out accuracy, length generalization, test-time scaling
   coconut.py              Coconut continuous-thought reasoning + verifier-selected best-of-N (Stage A)
+  lotus.py                Stage A restructured: parallel supervised latent block (scales where Coconut doesn't)
   comm.py                 latent inter-agent communication: speaker/listener + differentiable channel (Stage B)
   comm_transfer.py        held-out-partner test: cross-pair swap + fresh-partner learnability (Stage B analysis)
   comm_pop.py             partner randomization: population training -> canonical zero-shot latent code (Stage B)

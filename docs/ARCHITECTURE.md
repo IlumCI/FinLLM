@@ -303,6 +303,44 @@ labels at deploy. Nothing is verbalised; the verifier checks only the emitted
 number, so the thoughts stay a blackbox. Stage B reuses this continuous-input path
 for latent inter-agent messages (a message *is* a thought vector).
 
+### 10a. Restructured for scale: parallel supervised latents (`lamb/lotus.py`)
+
+The path above generates thoughts **autoregressively** -- one latent at a time,
+each conditioned on the last, supervised only by the final answer. That family's
+gap to explicit chain-of-thought *widens* with scale (arXiv:2606.31779: -0.1 pts at
+124M, -2.3 at 1B, -9.2 at 3B), while the looped parallel-supervised family stays
+flat (-1.5 at 3B). `LotusReasoner` is the restructure:
+
+```
+x = [prompt embeddings] ++ [L learned latent slots]     # appended all at once
+repeat R times:                                         # latent_block
+    h = core(x)
+    x = [prompt embeddings] ++ (latent_norm(h[latents]) + latent_marker)
+latent_logits = readout(h[latents])        # supervised per position (TRAINING ONLY)
+answer_logits = readout(core(x ++ answer)) # the only thing ever decoded
+```
+
+- **Parallel.** All `L` latents are refined together, so the cost is `R + 1` core
+  forwards **independent of `L`** (a test asserts 4 and 64 latents cost the same),
+  where the Coconut loop needed one sequential forward per thought. The latent
+  budget is free; that is the scalability argument.
+- **Per-position supervision.** LOTUS supervises latents against gold CoT tokens.
+  LAMb has no language, so the grammar emits a gold **numeric** trace -- the
+  intermediate sub-expression values, post-order, root excluded
+  (`TaskGrammar.sample_with_trace`) -- generated exactly and for free by the same
+  evaluator that serves as the reward oracle. No language, no external data.
+- **Blackbox preserved.** Latent positions are never decoded; only the answer is
+  emitted. The trace is a training signal, not an output. `trace_probe` reports how
+  well the latents encode the intermediates purely as a diagnostic.
+
+Measured on depth-2 nested expressions, matched budget (1000 steps, 0.28M params):
+Coconut sequential/answer-only `0.520` -> LOTUS parallel/answer-only `0.707`
+(+18.7 from structure alone, identical supervision) -> LOTUS parallel/+trace
+`0.875` (+16.8 more), with the trace-probe at `0.95` vs `0.10` at chance without
+supervision. The third arm uses information the others do not (the gold trace),
+which is free only because an exact verifier exists; the second arm is the
+matched-supervision control and already beats the autoregressive loop.
+
 ## 11. Latent inter-agent communication (Stage B, `lamb/comm.py`)
 
 Stage A gave one agent a continuous-thought scratchpad. Stage B makes the thought

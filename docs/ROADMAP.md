@@ -143,6 +143,48 @@ verifier's information — so the verifier's unique leverage is at inference.
 Refs: Coconut ([2412.06769](https://arxiv.org/abs/2412.06769)); inference-time
 scaling for continuous-space reasoning ([2510.12167](https://arxiv.org/abs/2510.12167)).
 
+### 3a. Restructured for scale: parallel supervised latents (LOTUS) — implemented
+
+The Coconut path above works at tiny scale, and that is precisely its documented
+limit. Measured across backbones ([2606.31779](https://arxiv.org/abs/2606.31779)),
+the **sequential** continuous-thought family's gap to explicit chain-of-thought
+*widens* with scale (−0.1 pts at 124M, −2.3 at 1B, **−9.2 at 3B** — a performance
+cliff), while the **looped, parallel-supervised** family stays flat (−1.5 at 3B).
+`lamb/lotus.py` (`python -m lamb.lotus`) is the restructure:
+
+- **Parallel, not autoregressive.** `n_latent` latent positions are appended after
+  the prompt at once and refined by `loops` passes through the shared core. Cost is
+  `O(loops)` forwards **regardless of the latent count** (asserted in tests: 4 and
+  64 latents both cost `loops+1` passes), where Coconut needed one sequential
+  forward per thought. The latent budget grows for free.
+- **Every latent position is supervised** through the LM head. LOTUS uses gold CoT
+  tokens; LAMb has no language, so it generates a gold **numeric** trace — the
+  intermediate sub-expression values — exactly and for free from its own evaluator
+  (`TaskGrammar.sample_with_trace`). No language, no external data, no annotation.
+- **Still a blackbox.** Latent positions are never decoded; only the answer is
+  emitted. The trace is a training signal, not an output.
+
+Measured on depth-2 nested expressions at matched budget (1000 steps, batch 64,
+0.28M params), decomposing the two changes:
+
+| arm | structure | supervision | answer acc | trace-probe |
+| --- | --- | --- | --- | --- |
+| Coconut (Stage A original) | sequential | answer-only | 0.520 | — |
+| LOTUS | **parallel** | answer-only | **0.707** | 0.103 (chance) |
+| LOTUS | parallel | **+ per-position trace** | **0.875** | 0.953 |
+
+Structure alone is worth **+18.7 pts** at identical supervision; the per-position
+trace adds **+16.8** more (0.520 → 0.875, +68% relative). The trace-probe (a
+diagnostic, never decoded) confirms the latent block really does carry the
+intermediates: 0.95 with supervision vs chance without. Note the third arm uses
+information the first two do not — the gold trace — which is free here only because
+an exact verifier exists; the second arm is the matched-supervision control, and it
+already beats Coconut.
+
+Refs: LOTUS ([2606.31779](https://arxiv.org/abs/2606.31779)); SIM-CoT
+([2509.20317](https://arxiv.org/abs/2509.20317)); looped transformers
+([2502.17416](https://arxiv.org/abs/2502.17416)).
+
 ## 3b. Latent inter-agent communication (Coconut) — Stage B implemented
 
 Implemented in `lamb/comm.py` (`python -m lamb.comm`). The message passed between

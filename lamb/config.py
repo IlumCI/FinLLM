@@ -203,6 +203,59 @@ class CoconutConfig:
 
 
 @dataclass
+class LotusConfig:
+    """Stage A, restructured: LOTUS-style *parallel supervised* latent reasoning.
+
+    Coconut's continuous thoughts are generated **autoregressively** -- one latent
+    at a time, each conditioned on the last -- and supervised only by the final
+    answer. That family's gap to explicit chain-of-thought *widens* with scale
+    (arXiv:2606.31779 measures -0.1 pts at 124M, -2.3 at 1B, -9.2 at 3B: a
+    performance cliff). The looped/parallel-supervised family stays flat (-1.5 at
+    3B), so it is the one worth scaling.
+
+    So: ``n_latent`` latent positions are appended after the prompt **all at once**
+    and refined by ``loops`` passes through the shared core (cost is O(loops)
+    forwards regardless of how many latents there are -- the scalability argument),
+    and **every latent position is supervised directly** through the LM head.
+
+    LOTUS supervises latents against gold chain-of-thought tokens. LAMb has no
+    language, but it has an exact evaluator, so it generates a gold **numeric**
+    trace -- the intermediate sub-expression values -- for free, with no language
+    and no external data (:meth:`TaskGrammar.sample_with_trace`). At inference the
+    latent positions are never decoded: only the answer is emitted, so the model
+    stays a blackbox. The trace is a training signal, not an output.
+    """
+
+    steps: int = 1000
+    batch_size: int = 64
+    lr: float = 2e-3
+    weight_decay: float = 0.01
+    warmup: int = 50
+    grad_clip: float = 1.0
+    seed: int = 0
+    device: str = "cpu"
+    amp: Optional[bool] = None
+
+    # Task space (matched to CoconutConfig so the two arms are comparable).
+    depth: int = 2
+    digits: int = 1
+    ops_key: int = 0
+
+    # The parallel latent block.
+    n_latent: int = 8        # L latent positions, computed together
+    loops: int = 3           # R refinement passes over the block
+    trace_coef: float = 0.5  # weight on per-position supervision (0 => answer-only ablation)
+
+    eval_every: int = 250
+    eval_tasks: int = 256
+    log_every: int = 50
+    ckpt_dir: str = "runs"
+
+    def max_answer_len(self) -> int:
+        return min(24, 2 + self.digits * (2 ** min(self.depth, 3)))
+
+
+@dataclass
 class CommConfig:
     """Stage B: latent inter-agent communication (message = a Coconut thought).
 

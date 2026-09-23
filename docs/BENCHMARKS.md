@@ -44,6 +44,16 @@ reversed vs. forward digits and Abacus on/off to attribute the gains.
     could not select; LAMb's verifier can). A test-time self-improvement loop.
   Covered by `tests/test_coconut.py` (incl. the `K=0` reduction to ordinary
   teacher forcing).
+- **Parallel supervised latents (LOTUS restructure, shipped)** — `python -m
+  lamb.lotus` (`lamb/lotus.py`). The sequential continuous-thought family's gap to
+  explicit CoT widens with scale (arXiv:2606.31779); the looped parallel-supervised
+  family stays flat, so Stage A was restructured onto it. Latents are refined
+  together (cost `loops+1` forwards independent of latent count) and every latent
+  position is supervised through the LM head against a gold **numeric** trace the
+  evaluator generates for free. Nothing latent is ever decoded. Measured at matched
+  budget on depth-2 nested expressions:
+  `Coconut 0.520 → LOTUS answer-only 0.707 → LOTUS +trace 0.875`, trace-probe
+  `0.95` vs `0.10` at chance. Covered by `tests/test_lotus.py`.
 - **Latent inter-agent communication (Stage B, shipped)** — `python -m lamb.comm`
   (`lamb/comm.py`) measures whether two agents can communicate a value in *pure
   latent space*. A speaker sees operand `X`, a listener sees `op` and `Y` and must

@@ -26,6 +26,18 @@ from .._native import evaluate
 
 OPS_SETS: Tuple[Tuple[str, ...], ...] = (("+", "-"), ("+", "-", "*"))
 
+_MAX_ABS = 2 ** 126  # stay inside the i128 range the native verifier uses
+
+
+def _apply(op: str, a: int, b: int) -> int:
+    if op == "+":
+        return a + b
+    if op == "-":
+        return a - b
+    if op == "*":
+        return a * b
+    raise ValueError(f"unsupported operator {op!r}")
+
 
 @dataclass(frozen=True)
 class Descriptor:
@@ -54,6 +66,38 @@ class TaskGrammar:
         left = self._build(depth - 1, digits, ops, rng)
         right = self._build(depth - 1, digits, ops, rng)
         return f"({left}){rng.choice(ops)}({right})"
+
+    def _build_traced(self, depth: int, digits: int, ops: Sequence[str],
+                      rng: random.Random) -> Tuple[str, int, List[int]]:
+        """``(expr, value, trace)`` where ``trace`` is the sub-expression values in
+        post-order, *excluding* the root (which is the answer)."""
+        if depth <= 1:
+            a, b = self._num(digits, rng), self._num(digits, rng)
+            op = rng.choice(ops)
+            return f"{a}{op}{b}", _apply(op, a, b), []
+        lexpr, lval, ltrace = self._build_traced(depth - 1, digits, ops, rng)
+        rexpr, rval, rtrace = self._build_traced(depth - 1, digits, ops, rng)
+        op = rng.choice(ops)
+        # post-order: everything each child computed, then the child's own value
+        return f"({lexpr}){op}({rexpr})", _apply(op, lval, rval), ltrace + [lval] + rtrace + [rval]
+
+    def sample_with_trace(self, descriptor: Descriptor, seed: int) -> Tuple[str, str, List[int]]:
+        """``(expression, exact_answer, trace)`` -- the gold *numeric* reasoning trace.
+
+        ``trace`` holds the intermediate sub-expression values in evaluation order,
+        excluding the final answer. It is generated exactly and for free by the
+        grammar itself: no language, no external data, no human annotation. This is
+        what supervises each latent position in the LOTUS-style parallel latent
+        block, standing in for the gold chain-of-thought tokens that method uses.
+        """
+        rng = random.Random(seed)
+        ops = self.ops_sets[descriptor.ops_key]
+        for _ in range(6):  # resample if any value would overflow the i128 verifier
+            expr, val, trace = self._build_traced(descriptor.depth, descriptor.digits, ops, rng)
+            if abs(val) < _MAX_ABS and all(abs(t) < _MAX_ABS for t in trace):
+                return expr, str(val), trace
+        a, b = self._num(descriptor.digits, rng), self._num(descriptor.digits, rng)
+        return f"{a}+{b}", str(a + b), []
 
     def sample(self, descriptor: Descriptor, seed: int) -> Tuple[str, str]:
         """Return a ``(expression, exact_answer)`` pair for the descriptor."""
