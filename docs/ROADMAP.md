@@ -549,7 +549,54 @@ widths 1–4 see every pattern and width 5 is pure periodicity. Prediction: the 
 holds and the token-trace baseline falls. If the ALU does not hold at width 5, the
 residue representation is not buying what it claims and this is mostly dead.
 
-Results: pending (`scratchpad/width_test.py`).
+**Result: the pre-registered test did not run, and that is the honest verdict.**
+1200 steps, batch 64, 0.28M params, trained on widths 1-4:
+
+| operand width | in training? | ALU (algebraic) | ALU leaf-residue | token-trace baseline |
+| --- | --- | --- | --- | --- |
+| 1 | yes | **0.992** | 0.998 | 0.133 |
+| 2 | yes | 0.000 | 0.054 (chance) | 0.012 |
+| 3 | yes | 0.000 | 0.053 | 0.000 |
+| 4 | yes | 0.000 | 0.059 | 0.000 |
+| 5 | **no** | 0.000 | 0.053 | 0.000 |
+
+Widths 2-4 were *in the training distribution* and sit at chance, for **both** arms
+— the baseline scored 0.133 at width 1 here against 0.903 in the single-width study
+of 3a-iv, so mixed-width training at this budget broke it too. Extrapolation cannot
+be measured from a model that failed in-distribution, so the pre-registration's
+"then it is mostly dead" does not apply: its precondition failed. What does survive
+is narrower and real — at the one width both arms could learn, on the same budget
+and the same information, the ALU reached **0.992 against the baseline's 0.133**.
+
+**The failure is a cliff, not a slope, and it exposes a design error.** At width 1
+the leaf values are at most 18, so `n mod p` is nearly the identity for moduli
+16/25/27/37 and almost no arithmetic is required; from width 2 the network must
+actually compute `n mod p` from digits. But **that is a known fixed linear function**
+— `Σ dᵢ·(10ⁱ mod p)` — and the digits are in the prompt. Asking a network to induce
+an exact function it could simply be given is a waste of capacity, not a test of the
+idea. Measured: a *fixed* digit→residue encoder plus algebraic composition is exact
+at depth 2 width 8, depth 3 width 4, depth 4 width 3 and depth 5 width 2, with
+nothing learned anywhere.
+
+That reframes what the ALU is for, and the reframing is not a consolation. With a
+fixed encoder and a known structure, LAMb+ALU on synthetic arithmetic **degenerates
+to an exact calculator** — correct at any width and depth, and evidence of nothing,
+because no learning is involved. The corollary has to be stated plainly: *synthetic
+arithmetic is the wrong benchmark for this component.* Its value is that arithmetic
+stops consuming capacity and stops being an error source, which only shows up where
+arithmetic is incidental and comprehension is the bottleneck. Validating it
+therefore has to wait for the bridge, which is a real deferral and not a result.
+
+**One thing did land, and it replaces the broken part.** The root-slot consistency
+check of 3a-vi is weak because the model never learns the root. Redundant residues
+give the same signal without it: size the moduli so legitimate values occupy a
+sub-range of the ring, and a single corrupted residue throws the CRT reconstruction
+outside that range. Measured over 20,000 trials with core `(16,25,27,11)` and
+redundant `(37,7)`: **100% of single-residue corruptions detected, 0 false alarms**
+(theoretical rate 99.61%). No labels, no root slot, no training — a pure range check
+on the reconstruction. That is the label-free correctness signal the project needs in
+order to survive leaving the distribution its verifier was written for.
+
 
 ## 3b. Latent inter-agent communication (Coconut) — Stage B implemented
 
