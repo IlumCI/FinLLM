@@ -246,6 +246,22 @@ class LotusConfig:
     loops: int = 3           # R refinement passes over the block
     trace_coef: float = 0.5  # weight on per-position supervision (0 => answer-only ablation)
 
+    # SWITCH-style boundary tokens (arXiv:2606.13106) wrapping the latent segment.
+    # Entering latent reasoning becomes a *predicted* token, so the segment has a
+    # well-defined probability (what makes on-policy RL over latent recurrence
+    # possible at all -- arXiv:2512.11816 showed it otherwise is not) and a fixed
+    # position for probes to attach to.
+    use_boundaries: bool = True
+    switch_coef: float = 0.1  # weight on predicting the entry boundary
+    # The *exit* marker is off by default, and measured: interposing a static EOT
+    # embedding between the refined latents and the answer readout makes the first
+    # answer token be predicted from a generic marker instead of the latent state,
+    # which halved accuracy (0.176 vs 0.371 control at 500 steps). Entry-only both
+    # fixes that and beats the control (0.500). This also matches arXiv:2606.13106's
+    # own finding that the computation concentrates at the *entry* transition; with
+    # a fixed latent budget the exit is deterministic and needs no marker.
+    use_exit_boundary: bool = False
+
     eval_every: int = 250
     eval_tasks: int = 256
     log_every: int = 50

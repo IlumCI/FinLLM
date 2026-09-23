@@ -53,7 +53,15 @@ reversed vs. forward digits and Abacus on/off to attribute the gains.
   evaluator generates for free. Nothing latent is ever decoded. Measured at matched
   budget on depth-2 nested expressions:
   `Coconut 0.520 → LOTUS answer-only 0.707 → LOTUS +trace 0.875`, trace-probe
-  `0.95` vs `0.10` at chance. Covered by `tests/test_lotus.py`.
+  `0.95` vs `0.10` at chance. Adding the SWITCH **entry** boundary token
+  (arXiv:2606.13106) — which gives the latent segment a well-defined log-probability
+  for RL — takes it to **0.934**. The *exit* marker is measurably harmful and off by
+  default (500-step control: no-boundary `0.371`, `BOT`+`EOT` `0.176`, `BOT`-only
+  `0.500`): a static marker between the latents and the answer readout blocks the
+  readout from the latent state. A class-balanced `boundary_probe` ships as the
+  monitorability handle but is **not yet a measurement** — the model is either too
+  accurate (too few errors) or too weak for the number to mean anything.
+  Covered by `tests/test_lotus.py`.
 - **Latent inter-agent communication (Stage B, shipped)** — `python -m lamb.comm`
   (`lamb/comm.py`) measures whether two agents can communicate a value in *pure
   latent space*. A speaker sees operand `X`, a listener sees `op` and `Y` and must

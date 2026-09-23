@@ -100,7 +100,7 @@ def test_gradients_reach_latent_parameters():
     tasks = tr._sample_batch(8)
     prompt, aids, aab, apad, targets, tmask, tr_ids, tr_mask = tr._collate(tasks)
     from lamb.coconut import _masked_ce
-    ans_logits, latent_logits, _ = tr.reasoner(prompt, aids, aab, apad)
+    ans_logits, latent_logits, _sw, _ = tr.reasoner(prompt, aids, aab, apad)
     (_masked_ce(ans_logits, targets, tmask) + _masked_ce(latent_logits, tr_ids, tr_mask)).backward()
     assert float(tr.reasoner.latent_emb.weight.grad.norm()) > 0.0
     assert float(tr.reasoner.latent_marker.grad.norm()) > 0.0
@@ -108,10 +108,62 @@ def test_gradients_reach_latent_parameters():
 
 
 def test_trace_coef_zero_is_the_answer_only_ablation():
-    tr = _trainer(trace_coef=0.0)
+    tr = _trainer(trace_coef=0.0, switch_coef=0.0)   # isolate the answer term alone
     m = tr._train_step(0)
     assert m["trace"] == 0.0            # no per-position supervision applied
+    assert m["switch"] == 0.0
     assert m["loss"] == m["ans"]
+
+
+def test_boundary_tokens_are_new_ids_outside_the_answer_alphabet():
+    tok = ArithmeticTokenizer()
+    assert tok.BOT == tok._digit0 + tok.base and tok.EOT == tok.BOT + 1
+    assert tok.vocab_size == tok.EOT + 1
+    # every pre-existing id is untouched, and boundaries are never digits/signs
+    assert not tok.is_digit_id(tok.BOT) and not tok.is_digit_id(tok.EOT)
+    # a stray boundary token can never corrupt a decoded answer
+    assert tok.decode_answer([tok.BOT, 10, tok.EOT, tok.EOS]) == "1"
+
+
+def test_switch_logits_give_the_latent_segment_a_probability():
+    """The entry boundary is a *predicted* token -- the hook on-policy RL needs."""
+    tr = _trainer()
+    tasks = tr._sample_batch(6)
+    prompt, aids, aab, apad, *_ = tr._collate(tasks)
+    _, _, switch_logits, _ = tr.reasoner(prompt, aids, aab, apad)
+    assert switch_logits is not None
+    assert switch_logits.shape == (6, tr.tok.vocab_size)
+    logp = torch.log_softmax(switch_logits, dim=-1)[:, tr.tok.BOT]
+    assert torch.isfinite(logp).all()          # a well-defined log-probability
+
+
+def test_boundaries_can_be_ablated():
+    tr = _trainer(use_boundaries=False)
+    assert tr.reasoner.bot_id is None and tr.reasoner.eot_id is None
+    tasks = tr._sample_batch(4)
+    prompt, aids, aab, apad, *_ = tr._collate(tasks)
+    _, _, switch_logits, _ = tr.reasoner(prompt, aids, aab, apad)
+    assert switch_logits is None
+    assert tr._train_step(0)["switch"] == 0.0
+    assert tr.reasoner.boundary_states(prompt) is None
+
+
+def test_exit_boundary_is_off_by_default():
+    """Entry marker on; exit marker off (measured: it blocks the answer readout)."""
+    tr = _trainer()
+    assert tr.reasoner.bot_id is not None
+    assert tr.reasoner.eot_id is None
+    opt_in = _trainer(use_exit_boundary=True)
+    assert opt_in.reasoner.eot_id is not None      # still available for ablation
+
+
+def test_boundary_states_are_a_probe_attachment_point():
+    tr = _trainer(n_latent=8)
+    tasks = tr._sample_batch(5)
+    prompt, *_ = tr._collate(tasks)
+    states = tr.reasoner.boundary_states(prompt)
+    assert states.shape == (5, tr.reasoner.model.cfg.d_model)
+    assert torch.isfinite(states).all()
 
 
 def test_training_reduces_loss_and_learns_the_trace():

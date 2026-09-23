@@ -71,11 +71,15 @@ def trace_targets(tok: ArithmeticTokenizer, trace: List[int]) -> List[int]:
 class LotusReasoner(nn.Module):
     """A LAMb core plus a parallel block of supervised latent positions."""
 
-    def __init__(self, model: LAMb, n_latent: int, loops: int):
+    def __init__(self, model: LAMb, n_latent: int, loops: int,
+                 bot_id: Optional[int] = None, eot_id: Optional[int] = None):
         super().__init__()
         self.model = model
         self.n_latent = int(n_latent)
         self.loops = max(1, int(loops))
+        # SWITCH boundaries; None on both disables them (the ablation).
+        self.bot_id = bot_id
+        self.eot_id = eot_id
         d = model.cfg.d_model
         # Learned initial content for each latent slot. They become input-dependent
         # through attention over the prompt, which precedes them causally.
@@ -86,43 +90,89 @@ class LotusReasoner(nn.Module):
         self.latent_norm = RMSNorm(d)
         self.latent_marker = nn.Parameter(torch.zeros(d))
 
+    def _marker(self, token_id: int, b: int, device) -> torch.Tensor:
+        """Embed a boundary token as an ordinary token (B, 1, d)."""
+        ids = torch.full((b, 1), token_id, dtype=torch.long, device=device)
+        zl = torch.zeros((b, 1), dtype=torch.long, device=device)
+        zf = torch.zeros((b, 1), dtype=torch.float32, device=device)
+        return self.model.embed(ids, zl, zf, zf)
+
     def latent_block(self, x_prompt: torch.Tensor, pad_prompt: torch.Tensor,
                      n_steps: Optional[int] = None):
-        """Append L latent positions and refine them with ``loops`` passes.
+        """Wrap L latent positions in boundaries and refine them with ``loops`` passes.
 
-        Returns ``(x, pad, latent_hidden)``. One core forward per loop iteration --
-        independent of ``n_latent``, because the positions are refined together.
+        Layout: ``[prompt] [BOT] [latent x L] [EOT]``. Returns
+        ``(x, pad, latent_hidden, boundary_hidden)``. One core forward per loop
+        iteration -- independent of ``n_latent``, because the positions are refined
+        together. ``boundary_hidden`` is the state at the BOT position, where
+        arXiv:2606.13106 finds the latent computation concentrates; it is the handle
+        a probe attaches to.
         """
         b, p, _ = x_prompt.shape
-        idx = torch.arange(self.n_latent, device=x_prompt.device)
+        dev = x_prompt.device
+        head = [x_prompt]
+        if self.bot_id is not None:
+            head.append(self._marker(self.bot_id, b, dev))
+        head_x = torch.cat(head, dim=1)
+        l0 = head_x.size(1)                       # index where the latents begin
+        tail_x = self._marker(self.eot_id, b, dev) if self.eot_id is not None else None
+
+        idx = torch.arange(self.n_latent, device=dev)
         lat = self.latent_emb(idx).unsqueeze(0).expand(b, -1, -1)
+        n_extra = (l0 - p) + (0 if tail_x is None else 1) + self.n_latent
         pad = torch.cat(
-            [pad_prompt, torch.zeros(b, self.n_latent, dtype=torch.bool, device=x_prompt.device)],
-            dim=1)
-        x = torch.cat([x_prompt, lat], dim=1)
+            [pad_prompt, torch.zeros(b, n_extra, dtype=torch.bool, device=dev)], dim=1)
+
+        def assemble(latents):
+            parts = [head_x, latents] + ([] if tail_x is None else [tail_x])
+            return torch.cat(parts, dim=1)
+
+        x = assemble(lat)
         h = None
         for _ in range(self.loops):
             h, _ = self.model.core(x, pad, n_steps)
-            lat = self.latent_norm(h[:, p:, :]) + self.latent_marker
-            x = torch.cat([x_prompt, lat], dim=1)   # prompt stays as embedded input
-        return x, pad, h[:, p:, :]
+            lat = self.latent_norm(h[:, l0:l0 + self.n_latent, :]) + self.latent_marker
+            x = assemble(lat)                     # prompt/boundaries stay as embedded input
+        latent_h = h[:, l0:l0 + self.n_latent, :]
+        boundary_h = h[:, l0 - 1, :] if self.bot_id is not None else None
+        return x, pad, latent_h, boundary_h
 
     def forward(self, prompt: Dict[str, torch.Tensor], answer_ids: torch.Tensor,
                 answer_abacus: torch.Tensor, answer_pad: torch.Tensor,
                 n_steps: Optional[int] = None):
-        """Teacher-forced answer logits **and** per-latent-position logits."""
+        """Answer logits, per-latent-position logits, and the entry-switch logits.
+
+        ``switch_logits`` is the distribution at the last prompt position, which
+        predicts the BOT boundary. That is the well-defined probability the latent
+        segment otherwise lacks -- the hook for on-policy RL.
+        """
         m = self.model
         x_prompt = m.embed(prompt["input_ids"], prompt["abacus_ids"],
                            prompt["value"], prompt["value_mask"])
-        x, pad, latent_h = self.latent_block(x_prompt, prompt["pad_mask"], n_steps)
+        p = x_prompt.size(1)
+        x, pad, latent_h, _ = self.latent_block(x_prompt, prompt["pad_mask"], n_steps)
         latent_logits = m._readout(latent_h)                     # (B, L, V) -> trace supervision
 
         z = torch.zeros_like(answer_abacus, dtype=torch.float32)
         x = torch.cat([x, m.embed(answer_ids, answer_abacus, z, z)], dim=1)
         pad = torch.cat([pad, answer_pad], dim=1)
         h, aux = m.core(x, pad, n_steps)
-        ans_logits = m._readout(h)[:, -(answer_ids.size(1) + 1):, :]
-        return ans_logits, latent_logits, aux
+        logits = m._readout(h)
+        ans_logits = logits[:, -(answer_ids.size(1) + 1):, :]
+        # Prompts are left-padded, so the last real prompt token is at p-1 for every
+        # row; that position is where "enter latent reasoning" is predicted.
+        switch_logits = logits[:, p - 1, :] if self.bot_id is not None else None
+        return ans_logits, latent_logits, switch_logits, aux
+
+    @torch.no_grad()
+    def boundary_states(self, prompt: Dict[str, torch.Tensor],
+                        n_steps: Optional[int] = None) -> torch.Tensor:
+        """Hidden state at the entry boundary (B, d) -- the probe attachment point."""
+        m = self.model
+        x_prompt = m.embed(prompt["input_ids"], prompt["abacus_ids"],
+                           prompt["value"], prompt["value_mask"])
+        _, _, _, boundary_h = self.latent_block(x_prompt, prompt["pad_mask"], n_steps)
+        return boundary_h
 
     @torch.no_grad()
     def solve(self, problems: List[str], tok: ArithmeticTokenizer, max_answer_len: int = 20,
@@ -133,7 +183,7 @@ class LotusReasoner(nn.Module):
         m = self.model
         x_prompt = m.embed(prompt["input_ids"], prompt["abacus_ids"],
                            prompt["value"], prompt["value_mask"])
-        x, pad, _ = self.latent_block(x_prompt, prompt["pad_mask"], n_steps)
+        x, pad, _, _ = self.latent_block(x_prompt, prompt["pad_mask"], n_steps)
         return _decode_answer(m, x, pad, tok, max_answer_len, device)
 
 
@@ -151,7 +201,9 @@ class LotusTrainer:
                                         n_prelude=1, n_recurrent=1, n_coda=1,
                                         recurrent_steps=4)
         model = build_model(mcfg, tokenizer).to(self.device)
-        self.reasoner = LotusReasoner(model, cfg.n_latent, cfg.loops).to(self.device)
+        bot = tokenizer.BOT if cfg.use_boundaries else None
+        eot = tokenizer.EOT if (cfg.use_boundaries and cfg.use_exit_boundary) else None
+        self.reasoner = LotusReasoner(model, cfg.n_latent, cfg.loops, bot, eot).to(self.device)
         self.opt = torch.optim.AdamW(self.reasoner.parameters(), lr=cfg.lr,
                                      weight_decay=cfg.weight_decay)
         self.grammar = TaskGrammar()
@@ -207,17 +259,25 @@ class LotusTrainer:
         for g in self.opt.param_groups:
             g["lr"] = self._lr_at(step)
         with self.amp.autocast():
-            ans_logits, latent_logits, _ = self.reasoner(prompt, aids, aab, apad)
+            ans_logits, latent_logits, switch_logits, _ = self.reasoner(prompt, aids, aab, apad)
             ans_loss = _masked_ce(ans_logits, targets, tmask)
             # Per-position supervision on the latent block. With trace_coef=0 this
             # reduces to the answer-only ablation (parallel latents, no trace).
             tr_loss = (_masked_ce(latent_logits, tr_ids, tr_mask)
                        if c.trace_coef > 0 and float(tr_mask.sum()) > 0
                        else torch.zeros((), device=ans_logits.device))
-            loss = ans_loss + c.trace_coef * tr_loss
+            # Entry boundary: make "start reasoning latently" a predicted token, so
+            # the latent segment has a probability an RL objective can act on.
+            if switch_logits is not None and c.switch_coef > 0:
+                bot = torch.full((switch_logits.size(0),), self.tok.BOT,
+                                 dtype=torch.long, device=switch_logits.device)
+                sw_loss = torch.nn.functional.cross_entropy(switch_logits, bot)
+            else:
+                sw_loss = torch.zeros((), device=ans_logits.device)
+            loss = ans_loss + c.trace_coef * tr_loss + c.switch_coef * sw_loss
         self.amp.backward_step(loss, self.opt, self.reasoner.parameters(), c.grad_clip)
         return {"loss": float(loss.detach()), "ans": float(ans_loss.detach()),
-                "trace": float(tr_loss.detach())}
+                "trace": float(tr_loss.detach()), "switch": float(sw_loss.detach())}
 
     # -- evaluation -------------------------------------------------------
     @torch.no_grad()
@@ -239,17 +299,74 @@ class LotusTrainer:
         self.reasoner.eval()
         tasks = self._eval_set(n_tasks)
         prompt, aids, aab, apad, _, _, tr_ids, tr_mask = self._collate(tasks)
-        _, latent_logits, _ = self.reasoner(prompt, aids, aab, apad)
+        _, latent_logits, _, _ = self.reasoner(prompt, aids, aab, apad)
         correct = (latent_logits.argmax(dim=-1) == tr_ids).float() * tr_mask
         return float(correct.sum() / tr_mask.sum().clamp_min(1.0))
+
+    @torch.no_grad()
+    def _boundary_data(self, tasks: List[Task]):
+        """Entry-boundary states plus whether the model actually answers correctly."""
+        prompt, *_ = self._collate(tasks)
+        states = self.reasoner.boundary_states(prompt)
+        ans = self.reasoner.solve([e for e, _, _ in tasks], self.tok, self.max_ans,
+                                  device=self.device)
+        y = torch.tensor([1.0 if self.verifier.check(e, a) else 0.0
+                          for (e, _, _), a in zip(tasks, ans)], device=self.device)
+        return states, y
+
+    def boundary_probe(self, n_tasks: int = 256, steps: int = 300) -> Tuple[float, float]:
+        """Monitorability check: is the blackbox readable at the boundary?
+
+        Fits a linear probe on the *entry-boundary* hidden state to predict whether
+        the model will answer correctly, and reports ``(held-out accuracy,
+        majority-class baseline)``. Nothing is decoded and no reasoning is
+        verbalised -- but if the probe beats the baseline, an opaque latent model is
+        still auditable at a single, fixed position. This is the practical answer to
+        the chain-of-thought-monitorability objection (arXiv:2507.11473), using the
+        attachment point the boundary tokens create.
+        """
+        tasks = self._eval_set(n_tasks)
+        states, y = self._boundary_data(tasks)
+        if states is None:
+            return float("nan"), float("nan")
+        # Balance the classes, so the baseline is 0.5 by construction and the number
+        # means something. Without this the metric is degenerate once the model is
+        # accurate: at 93% correct, "always say correct" scores 0.94 and there are
+        # too few errors left to fit a probe against.
+        pos = (y > 0.5).nonzero(as_tuple=True)[0]
+        neg = (y <= 0.5).nonzero(as_tuple=True)[0]
+        k = min(pos.numel(), neg.numel())
+        if k < 16:
+            return float("nan"), 0.5      # too few of one class to say anything
+        sel = torch.cat([pos[:k], neg[:k]])
+        sel = sel[torch.randperm(sel.numel(), device=sel.device)]
+        states, y = states[sel], y[sel]
+        n = states.size(0)
+        cut = n // 2
+        xtr, ytr, xte, yte = states[:cut], y[:cut], states[cut:], y[cut:]
+        mu, sd = xtr.mean(0, keepdim=True), xtr.std(0, keepdim=True).clamp_min(1e-6)
+        xtr, xte = (xtr - mu) / sd, (xte - mu) / sd
+        probe = torch.nn.Linear(states.size(1), 1).to(self.device)
+        opt = torch.optim.Adam(probe.parameters(), lr=1e-2, weight_decay=1e-3)
+        with torch.enable_grad():
+            for _ in range(steps):
+                opt.zero_grad()
+                loss = torch.nn.functional.binary_cross_entropy_with_logits(
+                    probe(xtr).squeeze(-1), ytr)
+                loss.backward()
+                opt.step()
+        with torch.no_grad():
+            pred = (probe(xte).squeeze(-1) > 0).float()
+            acc = float((pred == yte).float().mean())
+        return acc, 0.5   # balanced by construction
 
     def train(self) -> Dict[str, float]:
         c = self.cfg
         print(f"[lotus] {device_report(self.device, self.amp)} backend={self.verifier.backend}")
         print(f"[lotus] task=depth{c.depth}/digits{c.digits}/ops{c.ops_key} "
               f"latents={c.n_latent} loops={c.loops} trace_coef={c.trace_coef} "
-              f"params={self.reasoner.model.num_params()}")
-        run = {"loss": 0.0, "ans": 0.0, "trace": 0.0}
+              f"boundaries={c.use_boundaries} params={self.reasoner.model.num_params()}")
+        run = {"loss": 0.0, "ans": 0.0, "trace": 0.0, "switch": 0.0}
         final: Dict[str, float] = {}
         for step in range(c.steps):
             m = self._train_step(step)
@@ -257,14 +374,20 @@ class LotusTrainer:
                 run[k] += m[k]
             if (step + 1) % c.log_every == 0:
                 print(f"  step {step+1:5d}/{c.steps}  loss {run['loss']/c.log_every:.4f} "
-                      f"(ans {run['ans']/c.log_every:.4f} trace {run['trace']/c.log_every:.4f})  "
-                      f"lr {self._lr_at(step):.2e}")
+                      f"(ans {run['ans']/c.log_every:.4f} trace {run['trace']/c.log_every:.4f} "
+                      f"switch {run['switch']/c.log_every:.4f})  lr {self._lr_at(step):.2e}")
                 run = {k: 0.0 for k in run}
             if (step + 1) % c.eval_every == 0 or step == c.steps - 1:
                 acc, probe = self.accuracy(), self.trace_probe()
                 final = {"acc": acc, "trace_probe": probe}
                 print(f"  [eval @ {step+1}] answer acc {acc:.3f}   "
                       f"latent trace-probe {probe:.3f} (diagnostic; never decoded)")
+        if c.use_boundaries:
+            p_acc, p_base = self.boundary_probe()
+            final.update({"boundary_probe": p_acc, "boundary_base": p_base})
+            print(f"  [monitorability] boundary probe predicts correctness "
+                  f"{p_acc:.3f} vs balanced baseline {p_base:.3f} "
+                  f"({'inconclusive: too few errors to fit' if p_acc != p_acc else 'class-balanced'})")
         return final
 
 
@@ -280,6 +403,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--loops", type=int, default=LotusConfig.loops)
     p.add_argument("--trace-coef", type=float, default=LotusConfig.trace_coef,
                    help="weight on per-latent-position supervision (0 = answer-only ablation)")
+    p.add_argument("--no-boundaries", dest="use_boundaries", action="store_false", default=True,
+                   help="ablate the SWITCH entry boundary before the latent segment")
+    p.add_argument("--exit-boundary", action="store_true",
+                   help="also emit an exit marker (measured harmful: it blocks the "
+                        "answer readout from the latent states)")
+    p.add_argument("--switch-coef", type=float, default=LotusConfig.switch_coef,
+                   help="weight on predicting the entry boundary (the RL hook)")
     p.add_argument("--d-model", type=int, default=96)
     p.add_argument("--recurrent-steps", type=int, default=4)
     p.add_argument("--seed", type=int, default=LotusConfig.seed)
@@ -293,7 +423,8 @@ def main(argv: Optional[List[str]] = None) -> None:
     cfg = LotusConfig(steps=args.steps, batch_size=args.batch_size, depth=args.depth,
                       digits=args.digits, ops_key=args.ops_key, n_latent=args.n_latent,
                       loops=args.loops, trace_coef=args.trace_coef, seed=args.seed,
-                      device=device, amp=amp)
+                      use_boundaries=args.use_boundaries, switch_coef=args.switch_coef,
+                      use_exit_boundary=args.exit_boundary, device=device, amp=amp)
     tok = ArithmeticTokenizer()
     mcfg = ModelConfig(d_model=args.d_model, n_heads=4, d_ff=2 * args.d_model,
                        n_prelude=1, n_recurrent=1, n_coda=1, recurrent_steps=args.recurrent_steps)

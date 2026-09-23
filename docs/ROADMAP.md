@@ -185,6 +185,48 @@ Refs: LOTUS ([2606.31779](https://arxiv.org/abs/2606.31779)); SIM-CoT
 ([2509.20317](https://arxiv.org/abs/2509.20317)); looped transformers
 ([2502.17416](https://arxiv.org/abs/2502.17416)).
 
+### 3a-i. SWITCH boundary tokens — implemented (entry only)
+
+RL is the known dead end for latent reasoning: on-policy methods move a latent
+model essentially not at all (arXiv:2512.11816 — GRPO takes explicit CoT 62.6 →
+72.6 while latent goes 22.6 → 21.8), because a continuous segment has no
+well-defined policy ratio to optimise. SWITCH
+([2606.13106](https://arxiv.org/abs/2606.13106)) fixes that by making entry into
+the latent segment a **predicted token**. Two new ids (`BOT`, `EOT`) are appended
+after the digits, so every pre-existing id is unchanged and neither can ever appear
+in an answer.
+
+`LotusReasoner` emits `[prompt] [BOT] [latent x L]`. The last prompt position
+predicts `BOT`, which gives the latent block a real log-probability (the hook an RL
+objective needs) and a fixed position for probes to attach to. Measured on depth-2,
+1000 steps: **0.875 → 0.934** (+5.9) with the entry marker, trace-probe 0.982.
+
+**Negative result, and the reason the exit marker is off by default.** Wrapping the
+segment on *both* sides is actively harmful: a static `EOT` embedding sits between
+the refined latents and the answer readout, so the first answer token gets predicted
+from a generic marker instead of the latent state. Controlled at 500 steps:
+
+| variant | answer acc | trace-probe |
+| --- | --- | --- |
+| no boundaries (control) | 0.371 | 0.697 |
+| `BOT`+`EOT`, switch loss off | 0.176 | 0.468 |
+| **`BOT` only** | **0.500** | **0.821** |
+
+So the cost is structural, not the switch loss, and entry-only both fixes it and
+beats the control. This matches the paper's own finding that the computation
+concentrates at the *entry* transition; with a fixed latent budget the exit is
+deterministic and needs no marker. `--exit-boundary` re-enables it for ablation.
+
+**Monitorability: not established.** The boundary gives probes an attachment point,
+and `boundary_probe` fits a class-balanced linear probe on the entry state to
+predict whether the answer will be right — the practical reply to the
+CoT-monitorability objection ([2507.11473](https://arxiv.org/abs/2507.11473)). But
+it does not yet measure anything: at depth 2 the model is 93% correct, leaving too
+few errors to fit against; at depth 3 it only reaches 9%, and the balanced sample
+(24 held-out points) returns 0.333 vs a 0.5 baseline — noise. A real number needs a
+regime where the model is competent *and* fallible (~50-70%), which this tiny model
+on these tasks does not provide. The interface ships; the claim does not.
+
 ## 3b. Latent inter-agent communication (Coconut) — Stage B implemented
 
 Implemented in `lamb/comm.py` (`python -m lamb.comm`). The message passed between

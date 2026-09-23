@@ -53,10 +53,21 @@ class ArithmeticTokenizer:
         self.PAD, self.BOS, self.EOS, self.EQ = 0, 1, 2, 3
         self._op_ids: Dict[str, int] = {"+": 4, "-": 5, "*": 6, "(": 7, ")": 8}
         self._digit0 = 9  # digit d -> _digit0 + d
-        self.vocab_size = self._digit0 + base
+
+        # SWITCH-style latent-segment boundaries (arXiv:2606.13106), placed *after*
+        # the digits so every pre-existing id is unchanged. They delimit the latent
+        # reasoning segment: BOT is a genuinely *predicted* token, which is what
+        # gives an otherwise-opaque latent block a well-defined policy probability
+        # (the prerequisite for on-policy RL over latent recurrence) and a fixed
+        # attachment point for probes. Neither is ever part of an answer.
+        self.BOT = self._digit0 + base
+        self.EOT = self.BOT + 1
+        self.vocab_size = self.EOT + 1
 
         self._id_to_char: Dict[int, str] = {
             self.EQ: "=",
+            self.BOT: "<",
+            self.EOT: ">",
             **{v: k for k, v in self._op_ids.items()},
             **{self._digit0 + d: str(d) for d in range(base)},
         }

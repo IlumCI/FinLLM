@@ -333,6 +333,26 @@ answer_logits = readout(core(x ++ answer)) # the only thing ever decoded
   emitted. The trace is a training signal, not an output. `trace_probe` reports how
   well the latents encode the intermediates purely as a diagnostic.
 
+**SWITCH boundary tokens (entry only).** A continuous segment has no well-defined
+policy ratio, which is why on-policy RL moves a latent model essentially not at all
+(arXiv:2512.11816). SWITCH (arXiv:2606.13106) makes *entering* the latent segment a
+**predicted token**: two ids (`BOT`, `EOT`) are appended after the digits, so no
+pre-existing id shifts and neither can appear in an answer. The layout becomes
+`[prompt] [BOT] [latent x L]`, the last prompt position is trained to predict
+`BOT`, and `switch_logits` is that distribution -- a real log-probability for "think
+latently now", plus a fixed position (`boundary_states`) for probes. Worth +5.9 pts
+on depth-2 (0.875 -> 0.934).
+
+The *exit* marker is off by default because it measurably hurts: a static `EOT`
+embedding between the refined latents and the answer readout makes the first answer
+token be predicted from a generic marker rather than the latent state. At 500 steps,
+control 0.371 / `BOT`+`EOT` 0.176 / `BOT`-only 0.500 -- structural, not the switch
+loss, and entry-only beats the control. This matches the paper's finding that the
+computation concentrates at the entry transition; with a fixed latent budget the
+exit is deterministic. `boundary_probe` (class-balanced) exists as the monitorability
+handle, but is **not yet a result**: the model is either too accurate (too few
+errors to fit against) or too weak, so the number is currently noise.
+
 Measured on depth-2 nested expressions, matched budget (1000 steps, 0.28M params):
 Coconut sequential/answer-only `0.520` -> LOTUS parallel/answer-only `0.707`
 (+18.7 from structure alone, identical supervision) -> LOTUS parallel/+trace
