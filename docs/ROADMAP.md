@@ -171,8 +171,19 @@ Two agents solve, purely in latent space, a task neither can solve alone. A
 noisy channel dimensions); message diagnostics (`signal_std`, `msg_cos`) guard
 against the representational collapse of arXiv:2604.03809. `python -m lamb.comm --sweep`.
 
+**Held-out-partner test** (`python -m lamb.comm_transfer`). Is the emergent code a
+private co-adaptation or a shareable protocol (zero-shot coordination; Other-Play,
+arXiv:2003.02979)? Two independent pairs each reach `comm 1.000`, but a zero-shot
+speaker swap collapses to `0.004/0.041` — *below* the `0.076` blank prior (a
+foreign code actively misleads); yet a freshly trained receiver learns a frozen
+speaker's code to `1.000`. So the protocol is **private and strongly co-adapted
+but learnable** — idiosyncratic, not canonical, exactly as Other-Play predicts.
+Next step: partner randomization (train against a population of partners) to
+pressure a canonical, zero-shot-transferable code.
+
 Refs: DIAL ([1605.06676](https://arxiv.org/abs/1605.06676)); pitfalls of measuring
 emergent communication ([1903.05168](https://arxiv.org/abs/1903.05168));
+zero-shot coordination / Other-Play ([2003.02979](https://arxiv.org/abs/2003.02979));
 Interlat ([2511.09149](https://arxiv.org/abs/2511.09149)); DiffMAS
 ([2604.21794](https://arxiv.org/abs/2604.21794)).
 

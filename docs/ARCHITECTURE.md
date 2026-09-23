@@ -359,6 +359,20 @@ substrate the roadmap's language-bridge deliberately is not: agents that reason
 (arXiv:1605.06676), Coconut (arXiv:2412.06769), and the latent-agent-communication
 line (Interlat arXiv:2511.09149, DiffMAS arXiv:2604.21794).
 
+**Held-out-partner test** (`lamb/comm_transfer.py`, `python -m lamb.comm_transfer`).
+Because the pair trains together, the emergent code could be a *private*
+co-adaptation rather than a shareable protocol (the zero-shot-coordination
+problem; Other-Play, arXiv:2003.02979). Two probes settle it. *Cross-pair swap*:
+train two independent pairs to `comm 1.000` each, then give each listener the
+other's speaker -- accuracy collapses to `0.004 / 0.041`, *below* the `0.076`
+blank prior (a foreign code actively misleads, worse than silence).
+*Fresh-partner learnability*: freeze one speaker and train a new receiver against
+it -- it reaches `1.000`. So the protocol is private and strongly co-adapted, yet
+a well-formed language a new partner can *learn* -- idiosyncratic, not canonical.
+The standard fix, and the natural next step, is partner randomization (train each
+agent against a population of partners) to pressure a canonical, zero-shot-
+transferable code.
+
 ## Defaults
 
 Tiny CPU-first model: `d_model=128`, 1 prelude / 1 recurrent / 1 coda block,

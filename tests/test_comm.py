@@ -13,6 +13,7 @@ import torch
 
 from lamb import ArithmeticTokenizer, CommConfig
 from lamb.comm import Channel, CommTask, CommTrainer
+from lamb.comm_transfer import held_out_partner
 from lamb.coconut import _masked_ce
 from lamb._native import evaluate, verify
 
@@ -88,3 +89,21 @@ def test_short_training_reduces_loss():
     for s in range(1, 30):
         last = tr._train_step(s)
     assert last < first
+
+
+def test_foreign_speaker_produces_different_message():
+    tr = _trainer()
+    other = _trainer(seed=1)  # an independently initialised pair
+    with torch.no_grad():
+        m_self = tr._message(["7"])
+        m_other = tr._message(["7"], speaker=other.speaker)
+    assert m_self.shape == m_other.shape
+    assert float((m_self - m_other).abs().max()) > 1e-5  # a different partner speaks differently
+
+
+def test_held_out_partner_harness_runs():
+    tok = ArithmeticTokenizer()
+    cfg = CommConfig(steps=6, batch_size=16, d_model=48, recurrent_steps=3, eval_tasks=24)
+    r = held_out_partner(cfg, tok, seeds=(0, 1), fresh_steps=6, n_tasks=24)
+    assert set(r) >= {"A_matched", "A_swapped", "B_matched", "B_swapped", "blank", "fresh_partner"}
+    assert all(0.0 <= v <= 1.0 for v in r.values())

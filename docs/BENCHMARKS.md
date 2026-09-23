@@ -62,6 +62,11 @@ reversed vs. forward digits and Abacus on/off to attribute the gains.
     channel dimensions to transmit.
   - **Message diagnostics** — `signal_std` (does the message depend on `X`?) and
     `msg_cos` (representational-collapse detector, arXiv:2604.03809).
+  - **Held-out-partner** (`python -m lamb.comm_transfer`) — is the code private or
+    shareable (zero-shot coordination, arXiv:2003.02979)? Two pairs each reach
+    `comm 1.000`, a zero-shot speaker swap collapses to `0.004/0.041` (below the
+    `0.076` prior — a foreign code misleads), but a freshly trained receiver learns
+    a frozen speaker's code to `1.000`: private and co-adapted, yet learnable.
   Covered by `tests/test_comm.py`.
 - **ProntoQA / ProsQA** — the synthetic logical-reasoning sets Coconut used to
   show latent breadth-first reasoning beats token chain-of-thought. These need a

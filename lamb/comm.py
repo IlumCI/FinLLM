@@ -169,12 +169,18 @@ class CommTrainer:
         self.max_ans = cfg.max_answer_len()
 
     # -- communication primitives ----------------------------------------
-    def _message(self, a_views: List[str], dropout: float = 0.0) -> torch.Tensor:
-        """Speaker rolls ``n_msg`` latent thoughts from its view of X -> (B, M, d)."""
+    def _message(self, a_views: List[str], dropout: float = 0.0,
+                 speaker: Optional[LAMb] = None) -> torch.Tensor:
+        """Speaker rolls ``n_msg`` latent thoughts from its view of X -> (B, M, d).
+
+        ``speaker`` overrides ``self.speaker`` -- used by the held-out-partner test
+        to feed a *foreign* speaker's message into this pair's receiver stack.
+        """
+        spk = speaker if speaker is not None else self.speaker
         prompt, *_ = coconut_collate([(v, "0") for v in a_views], self.tok, self.device)
-        x = self.speaker.embed(prompt["input_ids"], prompt["abacus_ids"],
-                               prompt["value"], prompt["value_mask"])
-        x, _ = self.speaker._roll_thoughts(x, prompt["pad_mask"], self.cfg.n_msg, thought_dropout=dropout)
+        x = spk.embed(prompt["input_ids"], prompt["abacus_ids"],
+                      prompt["value"], prompt["value_mask"])
+        x, _ = spk._roll_thoughts(x, prompt["pad_mask"], self.cfg.n_msg, thought_dropout=dropout)
         return x[:, -self.cfg.n_msg:, :]
 
     def _listen_prefix(self, b_views: List[str], messages: torch.Tensor
@@ -229,14 +235,18 @@ class CommTrainer:
 
     # -- evaluation -------------------------------------------------------
     @torch.no_grad()
-    def accuracy(self, n_tasks: Optional[int] = None, blank: bool = False) -> float:
+    def accuracy(self, n_tasks: Optional[int] = None, blank: bool = False,
+                 speaker: Optional[LAMb] = None) -> float:
         """Exact-match accuracy. ``blank`` zeroes the message (no-information
         ablation): the listener then sees only ``op Y`` and the constant channel
-        marker, so this is the no-communication prior."""
+        marker, so this is the no-communication prior. ``speaker`` overrides the
+        message source (a foreign partner, for the held-out-partner test)."""
         self.speaker.eval(); self.listener.eval(); self.channel.eval()
+        if speaker is not None:
+            speaker.eval()
         n = n_tasks or self.cfg.eval_tasks
         samples = self._eval_set(n)
-        messages = self._message([s[0] for s in samples])
+        messages = self._message([s[0] for s in samples], speaker=speaker)
         if blank:
             messages = torch.zeros_like(messages)
         x, pad, _ = self._listen_prefix([s[1] for s in samples], messages)
