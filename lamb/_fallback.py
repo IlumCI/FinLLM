@@ -23,6 +23,22 @@ _BIN = {ast.Add: operator.add, ast.Sub: operator.sub, ast.Mult: operator.mul}
 _UN = {ast.UAdd: operator.pos, ast.USub: operator.neg}
 
 
+def _exact_div(a: int, b: int) -> Optional[int]:
+    """Integer division, or ``None`` when it is not exact.
+
+    The contract here is ``Optional[int]``, so a non-exact quotient has no
+    representation and must be rejected rather than rounded -- a rounded answer
+    would be a wrong answer presented as a right one. Problems needing true
+    rationals go through :mod:`lamb.rational`, which represents them exactly.
+    """
+    if b == 0 or a % b != 0:
+        return None
+    return a // b
+
+
+_BIN[ast.Div] = _exact_div          # registered after the helper it points at
+
+
 def _eval_node(node: ast.AST) -> Optional[int]:
     if isinstance(node, ast.Expression):
         return _eval_node(node.body)

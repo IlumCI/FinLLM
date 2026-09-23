@@ -151,3 +151,28 @@ def test_long_context_benchmarks_do_not_need_a_hash_partition():
                       (ruler_sigs(0, 40, False), ruler_sigs(999, 10, True))):
         assert len(train) > 1000 and len(ev) > 250
         assert not (train & ev)
+
+
+def test_division_problems_are_exact_and_the_old_op_sets_are_unchanged():
+    """Adding division must not reshuffle the problems every prior measurement used.
+
+    Draw order in the grammar is load-bearing: operands then operator. Choosing the
+    operator first -- the natural way to write the division branch -- changes every
+    problem the grammar has ever produced for a given seed, which would silently
+    invalidate comparison with everything measured before it.
+    """
+    from lamb._native import evaluate
+    from lamb.selfplay.grammar import Descriptor, TaskGrammar
+
+    g = TaskGrammar()
+    # the canonical value asserted elsewhere in the suite, unchanged
+    expr, ans, trace = g.sample_with_trace(Descriptor(2, 1, 0), 0)
+    assert (expr, ans, trace) == ("(6+6)-(4-8)", "16", [12, -4])
+
+    seen_div = 0
+    for depth in (1, 2, 3):
+        for seed in range(150):
+            e, a, _ = g.sample_with_trace(Descriptor(depth, 1, 2), seed)
+            assert evaluate(e) == int(a), (e, a)      # every division is exact
+            seen_div += "/" in e
+    assert seen_div > 100                              # division actually appears

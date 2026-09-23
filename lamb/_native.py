@@ -22,7 +22,17 @@ except Exception:  # noqa: BLE001 - any failure means: fall back to Python
 
 
 def evaluate(expr: str) -> Optional[int]:
-    return _rust.evaluate(expr) if _rust is not None else _fallback.evaluate(expr)
+    """Exact value of an integer expression, or ``None``.
+
+    Division routes to the Python path even when the Rust kernels are present. The
+    compiled extension predates ``/`` and an already-installed build cannot be
+    assumed to know it, so dispatching on the operator is robust against a stale
+    ``.so`` in a way that rebuilding is not. It costs nothing measurable: problem
+    generation profiles at 0.2% of a training step.
+    """
+    if _rust is not None and "/" not in expr:
+        return _rust.evaluate(expr)
+    return _fallback.evaluate(expr)
 
 
 def verify(expr: str, answer: str) -> bool:

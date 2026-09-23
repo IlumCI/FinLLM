@@ -20,12 +20,13 @@ from __future__ import annotations
 
 import random
 from dataclasses import dataclass
-from typing import List, Optional, Sequence, Tuple
+from typing import Callable, List, Optional, Sequence, Tuple
 
 from .._native import evaluate
 from ..holdout import is_heldout
 
-OPS_SETS: Tuple[Tuple[str, ...], ...] = (("+", "-"), ("+", "-", "*"))
+OPS_SETS: Tuple[Tuple[str, ...], ...] = (("+", "-"), ("+", "-", "*"),
+                                         ("+", "-", "*", "/"))
 
 _MAX_ABS = 2 ** 126  # stay inside the i128 range the native verifier uses
 
@@ -37,7 +38,28 @@ def _apply(op: str, a: int, b: int) -> int:
         return a - b
     if op == "*":
         return a * b
+    if op == "/":
+        if b == 0 or a % b != 0:
+            raise ValueError("inexact division should have been avoided upstream")
+        return a // b
     raise ValueError(f"unsupported operator {op!r}")
+
+
+def _exact_division_operands(digits: int, rng: random.Random,
+                             num: "Callable[[int, random.Random], int]") -> Tuple[int, int]:
+    """A dividend/divisor pair that divides exactly.
+
+    Constructed rather than rejected: picking two operands and resampling until the
+    division happens to be exact wastes most draws and biases the distribution
+    toward small divisors. Choosing the divisor and quotient and multiplying gives
+    a uniform, exact pair in one go. The dividend can exceed the nominal digit
+    width, which is correct -- "96 split into boxes of 12" is a normal thing for a
+    problem to say.
+    """
+    b = 0
+    while b == 0:
+        b = num(digits, rng)
+    return b * num(digits, rng), b
 
 
 @dataclass(frozen=True)
@@ -62,8 +84,12 @@ class TaskGrammar:
 
     def _build(self, depth: int, digits: int, ops: Sequence[str], rng: random.Random) -> str:
         if depth <= 1:
-            a, b = self._num(digits, rng), self._num(digits, rng)
-            return f"{a}{rng.choice(ops)}{b}"
+            op = rng.choice(ops)
+            if op == "/":
+                a, b = _exact_division_operands(digits, rng, self._num)
+            else:
+                a, b = self._num(digits, rng), self._num(digits, rng)
+            return f"{a}{op}{b}"
         left = self._build(depth - 1, digits, ops, rng)
         right = self._build(depth - 1, digits, ops, rng)
         return f"({left}){rng.choice(ops)}({right})"
@@ -73,12 +99,24 @@ class TaskGrammar:
         """``(expr, value, trace)`` where ``trace`` is the sub-expression values in
         post-order, *excluding* the root (which is the answer)."""
         if depth <= 1:
+            # Draw order is load-bearing: operands then operator, exactly as before
+            # division existed. Choosing the operator first reshuffles every problem
+            # this grammar has ever produced, silently invalidating every
+            # measurement taken against it. Division consumes *extra* draws after
+            # the fact, so op sets without "/" stay byte-identical.
             a, b = self._num(digits, rng), self._num(digits, rng)
             op = rng.choice(ops)
+            if op == "/":
+                a, b = _exact_division_operands(digits, rng, self._num)
             return f"{a}{op}{b}", _apply(op, a, b), []
         lexpr, lval, ltrace = self._build_traced(depth - 1, digits, ops, rng)
         rexpr, rval, rtrace = self._build_traced(depth - 1, digits, ops, rng)
         op = rng.choice(ops)
+        if op == "/" and (rval == 0 or lval % rval != 0):
+            # An internal division's operands are already fixed by the subtrees, so
+            # exactness cannot be arranged -- substitute rather than resample the
+            # whole tree, which would bias against deep expressions entirely.
+            op = "*"
         # post-order: everything each child computed, then the child's own value
         return f"({lexpr}){op}({rexpr})", _apply(op, lval, rval), ltrace + [lval] + rtrace + [rval]
 

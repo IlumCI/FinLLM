@@ -62,12 +62,22 @@ class ArithmeticTokenizer:
         # attachment point for probes. Neither is ever part of an answer.
         self.BOT = self._digit0 + base
         self.EOT = self.BOT + 1
-        self.vocab_size = self.EOT + 1
+        # Division, appended last for the same reason the boundaries were: the
+        # operator block at ids 4-8 is positional, so inserting '/' there would
+        # renumber '(' and ')' and invalidate every checkpoint and every id
+        # assertion in the tests. Grade-school word problems are built on division
+        # ("half as many", "split among four"), and the register machine can execute
+        # it exactly via the rational layer -- this is what lets a *problem* contain
+        # one.
+        self.DIV = self.EOT + 1
+        self._op_ids["/"] = self.DIV
+        self.vocab_size = self.DIV + 1
 
         self._id_to_char: Dict[int, str] = {
             self.EQ: "=",
             self.BOT: "<",
             self.EOT: ">",
+            self.DIV: "/",
             **{v: k for k, v in self._op_ids.items()},
             **{self._digit0 + d: str(d) for d in range(base)},
         }

@@ -118,7 +118,13 @@ def test_trace_coef_zero_is_the_answer_only_ablation():
 def test_boundary_tokens_are_new_ids_outside_the_answer_alphabet():
     tok = ArithmeticTokenizer()
     assert tok.BOT == tok._digit0 + tok.base and tok.EOT == tok.BOT + 1
-    assert tok.vocab_size == tok.EOT + 1
+    # '/' was appended after the boundaries for the same reason they were appended
+    # after the digits: the operator block is positional, so inserting anywhere
+    # earlier renumbers '(' and ')'. The invariant worth asserting is that the
+    # boundaries sit past the digits and nothing before them moved, not that they
+    # are last.
+    assert tok.DIV == tok.EOT + 1 and tok.vocab_size == tok.DIV + 1
+    assert tok._op_ids["+"] == 4 and tok._op_ids["("] == 7 and tok._digit0 == 9
     # every pre-existing id is untouched, and boundaries are never digits/signs
     assert not tok.is_digit_id(tok.BOT) and not tok.is_digit_id(tok.EOT)
     # a stray boundary token can never corrupt a decoded answer
