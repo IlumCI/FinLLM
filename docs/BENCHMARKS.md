@@ -52,10 +52,12 @@ reversed vs. forward digits and Abacus on/off to attribute the gains.
   position is supervised through the LM head against a gold **numeric** trace the
   evaluator generates for free. Nothing latent is ever decoded. Measured at matched
   budget on depth-2 nested expressions:
-  `Coconut 0.520 → LOTUS answer-only 0.707 → LOTUS +trace 0.875`, trace-probe
-  `0.95` vs `0.10` at chance. Adding the SWITCH **entry** boundary token
-  (arXiv:2606.13106) — which gives the latent segment a well-defined log-probability
-  for RL — takes it to **0.934**. The *exit* marker is measurably harmful and off by
+  `Coconut 0.512 → LOTUS answer-only 0.695 → LOTUS +trace 0.945`, trace-probe
+  `0.98` vs `0.10` at chance, on a hash-partitioned held-out set (`lamb/holdout.py`;
+  the earlier seed-separated split was 53% contaminated). The SWITCH **entry**
+  boundary (arXiv:2606.13106) showed **no measurable effect** once the eval was clean
+  (0.945 without vs 0.934 with) and its RL rationale was falsified, so it is off by
+  default. The *exit* marker is measurably harmful and off by
   default (500-step control: no-boundary `0.371`, `BOT`+`EOT` `0.176`, `BOT`-only
   `0.500`): a static marker between the latents and the answer readout blocks the
   readout from the latent state. A class-balanced `boundary_probe` ships as the

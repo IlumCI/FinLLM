@@ -42,6 +42,7 @@ import torch.nn as nn
 from .coconut import _masked_ce, coconut_collate
 from .comm import _decode_answer
 from .config import LotusConfig, ModelConfig
+from .holdout import is_heldout
 from .device import Amp, add_hardware_args, device_report, resolve_device, resolve_hardware
 from .model.lamb import LAMb, build_model
 from .model.transformer import RMSNorm
@@ -218,13 +219,31 @@ class LotusTrainer:
         out: List[Task] = []
         for _ in range(n):
             self._seed += 1
-            out.append(self.grammar.sample_with_trace(self.descriptor, self._seed))
+            out.append(self.grammar.sample_with_trace(self.descriptor, self._seed,
+                                                      exclude_heldout=True))
         return out
 
     def _eval_set(self, n: int) -> List[Task]:
+        """Held out by *problem*, not by seed: only the evaluation partition.
+
+        Seed separation is not enough -- the task space is small enough that a long
+        run trains on most of it, so a seed-separated eval set is over half
+        memorised. :mod:`lamb.holdout` partitions by a hash of the problem itself,
+        which training rejects, so overlap is zero however long training runs.
+        """
         rng = random.Random(self.cfg.seed * 7 + 12345)
-        return [self.grammar.sample_with_trace(self.descriptor, rng.randint(0, 2 ** 31 - 1))
-                for _ in range(n)]
+        out: List[Task] = []
+        seen = set()
+        for _ in range(400 * max(1, n)):          # bounded: small spaces may exhaust
+            if len(out) >= n:
+                break
+            t = self.grammar.sample_with_trace(self.descriptor, rng.randint(0, 2 ** 31 - 1))
+            if is_heldout(t[0]) and t[0] not in seen:
+                seen.add(t[0])
+                out.append(t)
+        while len(out) < n and out:               # tiny space: allow repeats
+            out.append(out[len(out) % len(seen)])
+        return out
 
     def _collate(self, tasks: List[Task]):
         prompt, aids, aab, apad, targets, tmask = coconut_collate(

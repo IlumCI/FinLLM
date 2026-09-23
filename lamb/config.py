@@ -251,7 +251,15 @@ class LotusConfig:
     # well-defined probability (what makes on-policy RL over latent recurrence
     # possible at all -- arXiv:2512.11816 showed it otherwise is not) and a fixed
     # position for probes to attach to.
-    use_boundaries: bool = True
+    # Default OFF. The entry boundary was added on the premise that it unblocks
+    # on-policy RL over latent recurrence; `lamb/latent_rl.py` tested that and it
+    # does not (GRPO moves the model ~0 either way). Its apparent +5.9 accuracy
+    # gain was measured on a contaminated eval set; on a clean held-out partition
+    # the sign flips to -1.1, i.e. it is indistinguishable from zero against a
+    # run-to-run spread of several points. It costs a sequence position and two
+    # vocabulary ids, so it is not on by default -- but it is kept, because it is
+    # the only well-defined attachment point for probes and for any future RL.
+    use_boundaries: bool = False
     switch_coef: float = 0.1  # weight on predicting the entry boundary
     # The *exit* marker is off by default, and measured: interposing a static EOT
     # embedding between the refined latents and the answer readout makes the first

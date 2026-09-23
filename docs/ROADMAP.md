@@ -169,12 +169,14 @@ Measured on depth-2 nested expressions at matched budget (1000 steps, batch 64,
 
 | arm | structure | supervision | answer acc | trace-probe |
 | --- | --- | --- | --- | --- |
-| Coconut (Stage A original) | sequential | answer-only | 0.520 | — |
-| LOTUS | **parallel** | answer-only | **0.707** | 0.103 (chance) |
-| LOTUS | parallel | **+ per-position trace** | **0.875** | 0.953 |
+| Coconut (Stage A original) | sequential | answer-only | 0.512 | — |
+| LOTUS | **parallel** | answer-only | **0.695** | 0.102 (chance) |
+| LOTUS | parallel | **+ per-position trace** | **0.945** | 0.976 |
 
-Structure alone is worth **+18.7 pts** at identical supervision; the per-position
-trace adds **+16.8** more (0.520 → 0.875, +68% relative). The trace-probe (a
+Structure alone is worth **+18.3 pts** at identical supervision; the per-position
+trace adds **+25.0** more (0.512 → 0.945). These are re-measured on a *clean*
+held-out partition (see below); the first reported numbers (0.520/0.707/0.875) came
+from a seed-separated eval set that was 53% contaminated. The trace-probe (a
 diagnostic, never decoded) confirms the latent block really does carry the
 intermediates: 0.95 with supervision vs chance without. Note the third arm uses
 information the first two do not — the gold trace — which is free here only because
@@ -197,9 +199,18 @@ after the digits, so every pre-existing id is unchanged and neither can ever app
 in an answer.
 
 `LotusReasoner` emits `[prompt] [BOT] [latent x L]`. The last prompt position
-predicts `BOT`, which gives the latent block a real log-probability (the hook an RL
-objective needs) and a fixed position for probes to attach to. Measured on depth-2,
-1000 steps: **0.875 → 0.934** (+5.9) with the entry marker, trace-probe 0.982.
+predicts `BOT`, which gives the latent block a real log-probability and a fixed position for
+probes to attach to.
+
+**The accuracy claim for this did not survive.** It was first measured as
+0.875 → 0.934 (+5.9) on a contaminated eval set. On the clean held-out partition the
+comparison is 0.945 without the boundary vs 0.934 with it — the sign flips, and both
+differences sit inside a run-to-run spread of several points. The honest reading is
+**no measurable effect**. Together with 3a-ii (its RL rationale falsified), the entry
+boundary is therefore **off by default**: it costs a sequence position and two
+vocabulary ids for nothing demonstrated. It is kept opt-in (`use_boundaries=True`)
+because it remains the only well-defined attachment point for a probe or an RL
+policy.
 
 **Negative result, and the reason the exit marker is off by default.** Wrapping the
 segment on *both* sides is actively harmful: a static `EOT` embedding sits between
@@ -253,9 +264,11 @@ Three arms run from one shared supervised checkpoint, same step budget, same eva
 **RL is inert.** At best +0.035 where the same step budget spent supervised gives
 +0.379 — an order of magnitude worse. This reproduces arXiv:2512.11816 (GRPO moved
 a latent model 22.6 → 21.8) and, more importantly, the boundary tokens did **not**
-rescue it: the switch arm is indistinguishable from answer-only. The 3a-i entry
-boundary keeps its measured +5.9 accuracy gain, but the *reason* it was built does
-not hold here.
+rescue it: the switch arm is indistinguishable from answer-only. (These numbers are
+from the contaminated-eval era; contamination would if anything *favour* the
+supervised arm, and the gap is an order of magnitude, so the conclusion stands.)
+Combined with the clean re-measurement in 3a-i — where the boundary's apparent
+accuracy gain vanished — the entry boundary delivered nothing it was built for.
 
 Observed mechanism, and an honest limit of this test: the switch policy collapsed
 to a single budget (max) within ~100 steps, entropy 0.09 → 0.01, and an entropy
@@ -271,6 +284,35 @@ Next, if this is revisited: a reward that charges for latent compute
 choice. Until then, **do not plan on RL as the self-improvement mechanism for the
 latent path** — the verifier-selected best-of-N search in 3 remains the mechanism
 that measurably works.
+
+### 3a-iii. Eval contamination — found and fixed
+
+Every accuracy number above was originally measured against a *seed-separated*
+held-out set, which turned out not to be held out at all. Disjoint seeds are not
+disjoint problems: the depth-2/1-digit space has ~80k expressions and a 1000-step
+run at batch 64 draws 64k of them, so **53% of the "held-out" set had been trained
+on** — and the contamination grew with training length, biasing precisely the
+longer-vs-shorter comparisons the project relies on. The Stage B comm task was
+worse: a 200-problem space, trained on in full, so its eval was **100%** seen.
+
+`lamb/holdout.py` fixes this structurally. Membership is decided by a hash of the
+problem string, so a problem is permanently either train or eval, independent of
+seeds and of how long training runs; training samplers reject the eval partition and
+eval sets draw only from it. `tests/test_holdout.py` asserts zero overlap for the
+grammar, Coconut, LOTUS and comm streams.
+
+Effect on the results: the LOTUS restructure held up almost unchanged
+(0.520→0.512, 0.707→0.695) and the trace arm improved (0.875→0.945) — a 0.28M model
+on 44k problems cannot memorise much, so it was largely generalising already. The
+boundary claim did **not** hold up (3a-i). One further lesson: the same nominal
+config moved ~7 points across two runs differing only in the eval partition, which
+puts a floor under how large an effect has to be before it means anything here.
+
+For Stage B the partition is real but small (~22 of 200 problems at 1 digit), so
+the comm accuracy is best read as a *channel* test — the listener never sees `X`, so
+it cannot answer from memorisation without the message — rather than a
+generalisation test. `--a-digits 2` gives a 20k-problem space if a generalisation
+claim is wanted.
 
 ## 3b. Latent inter-agent communication (Coconut) — Stage B implemented
 

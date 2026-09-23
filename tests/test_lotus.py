@@ -126,8 +126,11 @@ def test_boundary_tokens_are_new_ids_outside_the_answer_alphabet():
 
 
 def test_switch_logits_give_the_latent_segment_a_probability():
-    """The entry boundary is a *predicted* token -- the hook on-policy RL needs."""
-    tr = _trainer()
+    """The entry boundary is a *predicted* token -- a well-defined probability.
+
+    (It is opt-in: RL over it was tested and did not help. See docs/ROADMAP 3a-ii.)
+    """
+    tr = _trainer(use_boundaries=True)
     tasks = tr._sample_batch(6)
     prompt, aids, aab, apad, *_ = tr._collate(tasks)
     _, _, switch_logits, _ = tr.reasoner(prompt, aids, aab, apad)
@@ -138,7 +141,7 @@ def test_switch_logits_give_the_latent_segment_a_probability():
 
 
 def test_boundaries_can_be_ablated():
-    tr = _trainer(use_boundaries=False)
+    tr = _trainer(use_boundaries=False)  # the default; asserted explicitly
     assert tr.reasoner.bot_id is None and tr.reasoner.eot_id is None
     tasks = tr._sample_batch(4)
     prompt, aids, aab, apad, *_ = tr._collate(tasks)
@@ -148,17 +151,20 @@ def test_boundaries_can_be_ablated():
     assert tr.reasoner.boundary_states(prompt) is None
 
 
-def test_exit_boundary_is_off_by_default():
-    """Entry marker on; exit marker off (measured: it blocks the answer readout)."""
+def test_boundaries_are_off_by_default_but_available():
+    """Both markers off by default: the entry boundary showed no measurable
+    benefit on a clean eval split and its RL rationale was falsified. Kept as an
+    opt-in, since it is the only defined probe/RL attachment point."""
     tr = _trainer()
-    assert tr.reasoner.bot_id is not None
-    assert tr.reasoner.eot_id is None
-    opt_in = _trainer(use_exit_boundary=True)
-    assert opt_in.reasoner.eot_id is not None      # still available for ablation
+    assert tr.reasoner.bot_id is None and tr.reasoner.eot_id is None
+    on = _trainer(use_boundaries=True)
+    assert on.reasoner.bot_id is not None and on.reasoner.eot_id is None
+    both = _trainer(use_boundaries=True, use_exit_boundary=True)
+    assert both.reasoner.eot_id is not None        # still available for ablation
 
 
 def test_boundary_states_are_a_probe_attachment_point():
-    tr = _trainer(n_latent=8)
+    tr = _trainer(n_latent=8, use_boundaries=True)
     tasks = tr._sample_batch(5)
     prompt, *_ = tr._collate(tasks)
     states = tr.reasoner.boundary_states(prompt)

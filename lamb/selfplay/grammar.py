@@ -23,6 +23,7 @@ from dataclasses import dataclass
 from typing import List, Optional, Sequence, Tuple
 
 from .._native import evaluate
+from ..holdout import is_heldout
 
 OPS_SETS: Tuple[Tuple[str, ...], ...] = (("+", "-"), ("+", "-", "*"))
 
@@ -81,7 +82,8 @@ class TaskGrammar:
         # post-order: everything each child computed, then the child's own value
         return f"({lexpr}){op}({rexpr})", _apply(op, lval, rval), ltrace + [lval] + rtrace + [rval]
 
-    def sample_with_trace(self, descriptor: Descriptor, seed: int) -> Tuple[str, str, List[int]]:
+    def sample_with_trace(self, descriptor: Descriptor, seed: int,
+                          exclude_heldout: bool = False) -> Tuple[str, str, List[int]]:
         """``(expression, exact_answer, trace)`` -- the gold *numeric* reasoning trace.
 
         ``trace`` holds the intermediate sub-expression values in evaluation order,
@@ -92,25 +94,39 @@ class TaskGrammar:
         """
         rng = random.Random(seed)
         ops = self.ops_sets[descriptor.ops_key]
-        for _ in range(6):  # resample if any value would overflow the i128 verifier
+        for _ in range(32):  # resample on i128 overflow, or if it lands in the eval partition
             expr, val, trace = self._build_traced(descriptor.depth, descriptor.digits, ops, rng)
-            if abs(val) < _MAX_ABS and all(abs(t) < _MAX_ABS for t in trace):
-                return expr, str(val), trace
-        a, b = self._num(descriptor.digits, rng), self._num(descriptor.digits, rng)
-        return f"{a}+{b}", str(a + b), []
+            if abs(val) >= _MAX_ABS or any(abs(t) >= _MAX_ABS for t in trace):
+                continue
+            if exclude_heldout and is_heldout(expr):
+                continue
+            return expr, str(val), trace
+        for _ in range(32):   # degrade to a binary op that cannot overflow
+            a, b = self._num(descriptor.digits, rng), self._num(descriptor.digits, rng)
+            expr = f"{a}+{b}"
+            if not (exclude_heldout and is_heldout(expr)):
+                return expr, str(a + b), []
+        return expr, str(a + b), []
 
-    def sample(self, descriptor: Descriptor, seed: int) -> Tuple[str, str]:
+    def sample(self, descriptor: Descriptor, seed: int,
+               exclude_heldout: bool = False) -> Tuple[str, str]:
         """Return a ``(expression, exact_answer)`` pair for the descriptor."""
         rng = random.Random(seed)
         ops = self.ops_sets[descriptor.ops_key]
-        for _ in range(6):  # resample if a value overflows i128
+        for _ in range(32):  # resample on overflow, or if it lands in the eval partition
             expr = self._build(descriptor.depth, descriptor.digits, ops, rng)
             val = evaluate(expr)
-            if val is not None:
-                return expr, str(val)
+            if val is None:
+                continue
+            if exclude_heldout and is_heldout(expr):
+                continue
+            return expr, str(val)
         # Degrade to a single binary op that cannot overflow at these widths.
-        a, b = self._num(descriptor.digits, rng), self._num(descriptor.digits, rng)
-        expr = f"{a}+{b}"
+        for _ in range(32):
+            a, b = self._num(descriptor.digits, rng), self._num(descriptor.digits, rng)
+            expr = f"{a}+{b}"
+            if not (exclude_heldout and is_heldout(expr)):
+                return expr, str(a + b)
         return expr, str(a + b)
 
     def max_answer_len(self, max_depth: int, max_digits: int) -> int:

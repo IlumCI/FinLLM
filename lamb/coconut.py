@@ -46,6 +46,7 @@ import torch
 import torch.nn.functional as F
 
 from .config import CoconutConfig, ModelConfig
+from .holdout import is_heldout
 from .device import Amp, add_hardware_args, device_report, resolve_device, resolve_hardware
 from .model.lamb import build_model
 from .selfplay.grammar import Descriptor, TaskGrammar
@@ -141,7 +142,7 @@ class CoconutTrainer:
         out: List[Pair] = []
         for _ in range(n):
             self._seed += 1
-            out.append(self.grammar.sample(self.descriptor, self._seed))
+            out.append(self.grammar.sample(self.descriptor, self._seed, exclude_heldout=True))
         return out
 
     def _train_thoughts(self) -> int:
@@ -239,9 +240,21 @@ class CoconutTrainer:
         return cos_sum / k, std_sum / k
 
     def _eval_set(self, n: int) -> List[Pair]:
-        # Deterministic held-out set (seed range disjoint from training's running seed).
+        """Held out by *problem* (lamb.holdout), not merely by seed -- seed
+        separation leaves over half the set memorised on this small task space."""
         rng = random.Random(self.cfg.seed * 7 + 12345)
-        return [self.grammar.sample(self.descriptor, rng.randint(0, 2 ** 31 - 1)) for _ in range(n)]
+        out: List[Pair] = []
+        seen = set()
+        for _ in range(400 * max(1, n)):
+            if len(out) >= n:
+                break
+            pr = self.grammar.sample(self.descriptor, rng.randint(0, 2 ** 31 - 1))
+            if is_heldout(pr[0]) and pr[0] not in seen:
+                seen.add(pr[0])
+                out.append(pr)
+        while len(out) < n and out:
+            out.append(out[len(out) % len(seen)])
+        return out
 
     # -- driver -----------------------------------------------------------
     def train(self) -> None:

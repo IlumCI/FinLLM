@@ -19,7 +19,10 @@ from lamb.lotus import LotusTrainer
 
 def _setup(use_switch=True, steps=6):
     torch.manual_seed(0)
-    cfg = LotusConfig(steps=20, batch_size=16, n_latent=8, loops=3, eval_tasks=16, device="cpu")
+    # boundaries are opt-in now (their RL rationale was falsified); the switch head
+    # needs one, so the RL experiment explicitly turns it on.
+    cfg = LotusConfig(steps=20, batch_size=16, n_latent=8, loops=3, eval_tasks=16,
+                      device="cpu", use_boundaries=True)
     mcfg = ModelConfig(d_model=48, n_heads=4, d_ff=96, recurrent_steps=3)
     tr = LotusTrainer(cfg, ArithmeticTokenizer(), mcfg)
     for s in range(steps):

@@ -93,7 +93,13 @@ class LatentPolicy(nn.Module):
         super().__init__()
         self.r = reasoner
         self.budgets = tuple(budgets)
-        self.use_switch = bool(use_switch) and reasoner.bot_id is not None
+        if use_switch and reasoner.bot_id is None:
+            # Silently dropping the switch would turn the treatment arm into the
+            # control and quietly invalidate the whole comparison.
+            raise ValueError(
+                "use_switch=True needs a boundary: build the reasoner with "
+                "LotusConfig(use_boundaries=True)")
+        self.use_switch = bool(use_switch)
         d = reasoner.model.cfg.d_model
         self.switch_head = nn.Linear(d, len(self.budgets)) if self.use_switch else None
 
@@ -381,7 +387,8 @@ def main(argv: Optional[List[str]] = None) -> None:
     cfg = LotusConfig(steps=args.sft_steps + args.rl_steps, batch_size=args.batch_size,
                       depth=args.depth, digits=args.digits, n_latent=args.n_latent,
                       loops=args.loops, eval_tasks=args.eval_tasks, seed=args.seed,
-                      device=device, amp=amp)
+                      device=device, amp=amp,
+                      use_boundaries=True)   # the switch head attaches to the boundary
     tok = ArithmeticTokenizer()
     mcfg = ModelConfig(d_model=args.d_model, n_heads=4, d_ff=2 * args.d_model,
                        n_prelude=1, n_recurrent=1, n_coda=1, recurrent_steps=4)

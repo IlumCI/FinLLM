@@ -340,8 +340,11 @@ policy ratio, which is why on-policy RL moves a latent model essentially not at 
 pre-existing id shifts and neither can appear in an answer. The layout becomes
 `[prompt] [BOT] [latent x L]`, the last prompt position is trained to predict
 `BOT`, and `switch_logits` is that distribution -- a real log-probability for "think
-latently now", plus a fixed position (`boundary_states`) for probes. Worth +5.9 pts
-on depth-2 (0.875 -> 0.934).
+latently now", plus a fixed position (`boundary_states`) for probes. Its accuracy claim did **not** survive a clean
+eval: first measured 0.875 -> 0.934 (+5.9) on a contaminated split, it is 0.945
+(without) vs 0.934 (with) on the held-out partition -- no measurable effect. With its
+RL rationale also falsified (see ROADMAP 3a-ii) it is **off by default**, kept opt-in
+purely as a probe/RL attachment point.
 
 The *exit* marker is off by default because it measurably hurts: a static `EOT`
 embedding between the refined latents and the answer readout makes the first answer
@@ -353,10 +356,12 @@ exit is deterministic. `boundary_probe` (class-balanced) exists as the monitorab
 handle, but is **not yet a result**: the model is either too accurate (too few
 errors to fit against) or too weak, so the number is currently noise.
 
-Measured on depth-2 nested expressions, matched budget (1000 steps, 0.28M params):
-Coconut sequential/answer-only `0.520` -> LOTUS parallel/answer-only `0.707`
+Measured on depth-2 nested expressions, matched budget (1000 steps, 0.28M params),
+on a hash-partitioned held-out set (`lamb/holdout.py` -- seed separation left the
+old eval 53% contaminated):
+Coconut sequential/answer-only `0.512` -> LOTUS parallel/answer-only `0.695`
 (+18.7 from structure alone, identical supervision) -> LOTUS parallel/+trace
-`0.875` (+16.8 more), with the trace-probe at `0.95` vs `0.10` at chance without
+`0.945` (+25.0 more), with the trace-probe at `0.98` vs `0.10` at chance without
 supervision. The third arm uses information the others do not (the gold trace),
 which is free only because an exact verifier exists; the second arm is the
 matched-supervision control and already beats the autoregressive loop.

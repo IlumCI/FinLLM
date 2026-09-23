@@ -37,6 +37,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from ._native import evaluate, verify
+from .holdout import is_heldout
 from .coconut import coconut_collate, _masked_ce
 from .config import CommConfig, ModelConfig
 from .device import Amp, add_hardware_args, device_report, resolve_device, resolve_hardware
@@ -51,8 +52,16 @@ Sample = Tuple[str, str, str, str]
 class CommTask:
     """Sampler for the split problem: speaker sees ``X``, listener sees ``op Y``."""
 
-    def __init__(self, a_digits: int, b_digits: int, ops: Tuple[str, ...], seed: int):
+    def __init__(self, a_digits: int, b_digits: int, ops: Tuple[str, ...], seed: int,
+                 split: str = "any"):
+        """``split``: 'train' excludes the eval partition, 'eval' keeps only it.
+
+        The partition is by a hash of the problem (:mod:`lamb.holdout`), not by
+        seed -- at 1 digit the whole space is 200 problems, so seed separation
+        leaves an eval set that is 100% memorised.
+        """
         self.a_digits, self.b_digits, self.ops = a_digits, b_digits, tuple(ops)
+        self.split = split
         self.rng = random.Random(seed)
 
     def _num(self, digits: int) -> int:
@@ -66,12 +75,22 @@ class CommTask:
             x, y = self._num(self.a_digits), self._num(self.b_digits)
             op = self.rng.choice(self.ops)
             full = f"{x}{op}{y}"
+            if self.split == "train" and is_heldout(full):
+                continue
+            if self.split == "eval" and not is_heldout(full):
+                continue
             val = evaluate(full)
             if val is None:  # never for +/- at these widths, but stay safe
                 continue
             out.append((str(x), f"{op}{y}", str(val), full))
-        while len(out) < n:  # top up if any were skipped
+        for _ in range(64):  # top up if any were skipped (bounded for tiny splits)
+            if len(out) >= n:
+                break
             out.extend(self.sample(n - len(out)))
+        if out:                       # a tiny partition must repeat; cycle, do not
+            base = list(out)          # hammer one element
+            while len(out) < n:
+                out.append(base[len(out) % len(base)])
         return out[:n]
 
 
@@ -167,7 +186,7 @@ class CommTrainer:
         params = (list(self.speaker.parameters()) + list(self.listener.parameters())
                   + list(self.channel.parameters()))
         self.opt = torch.optim.AdamW(params, lr=cfg.lr, weight_decay=cfg.weight_decay)
-        self.task = CommTask(cfg.a_digits, cfg.b_digits, cfg.ops, cfg.seed)
+        self.task = CommTask(cfg.a_digits, cfg.b_digits, cfg.ops, cfg.seed, split="train")
         self.max_ans = cfg.max_answer_len()
 
     # -- communication primitives ----------------------------------------
@@ -275,7 +294,7 @@ class CommTrainer:
 
     def _eval_set(self, n: int) -> List[Sample]:
         holdout = CommTask(self.cfg.a_digits, self.cfg.b_digits, self.cfg.ops,
-                           self.cfg.seed * 7 + 99_991)
+                           self.cfg.seed * 7 + 99_991, split="eval")
         return holdout.sample(n)
 
     def train(self) -> None:
