@@ -273,3 +273,250 @@ class MemRegTrainer:
             by_d.setdefault(e["distance"], []).append(int(got[i] == answers[i]))
         out["by_distance"] = {d: sum(v) / len(v) for d, v in sorted(by_d.items())}
         return out
+
+
+# ---------------------------------------------------------------------------
+# Design 2: more bindings than registers, so something must choose
+# ---------------------------------------------------------------------------
+
+class SelectiveLoader(torch.nn.Module):
+    """Choose which `R` of `N` bindings occupy the register file.
+
+    Design 1 (`MemRegReasoner`) put every binding in a register, which left no retrieval
+    to do: order-indexed registers made the pointer an uncountable function of position,
+    and key-indexed registers made it a constant. Retrieval only exists when the file is
+    too small for the context.
+
+    The wall this has to avoid is ROADMAP 3a-vi: a network cannot learn the digit->residue
+    map, so nothing learned may sit between a value and its code. It is avoided by
+    selecting **positions, not values**. The head emits one distribution per register slot
+    over the `N` candidate bindings; the candidates' codes are the exact ones the fixed map
+    produced; and the register is their mixture. Nothing about arithmetic or encoding is
+    learned, only *which digits to look at*.
+
+    That makes it the same object as a pointer read (`RegisterFile.read`): a mixture of
+    residue distributions is a residue distribution, so it is differentiable, and a sharp
+    selection is exact. It inherits the same caveat as every soft read here -- decoding
+    argmaxes each modulus independently, so a blurred selection can decode to a value in
+    no candidate at all (3a-x) -- which is contained by selections going sharp and by the
+    refusal signal of 3a-xix.
+    """
+
+    def __init__(self, d_model: int, n_registers: int, n_candidates: int):
+        super().__init__()
+        self.n_registers = n_registers
+        self.n_candidates = n_candidates
+        self.head = torch.nn.Linear(d_model, n_candidates)
+
+    def logits(self, latent_h: torch.Tensor) -> torch.Tensor:
+        """``(B, R, N)``: for each register slot, where in the context to read from."""
+        return self.head(latent_h[:, : self.n_registers])
+
+    def load(self, latent_h: torch.Tensor, codes: torch.Tensor,
+             tau: float = 0.0, hard: bool = False):
+        """``codes`` is ``(B, N, K, P)``, the exact code of every candidate binding.
+
+        Returns ``((B, R, K, P)`` register contents, selection logits).
+        """
+        lg = self.logits(latent_h)
+        w = (torch.softmax(lg, dim=-1) if tau <= 0 else
+             torch.nn.functional.gumbel_softmax(lg, tau=tau, hard=hard, dim=-1))
+        return torch.einsum("brn,bnkp->brkp", w, codes), lg
+
+    def select_loss(self, lg: torch.Tensor, gold: Sequence[Sequence[int]]) -> torch.Tensor:
+        """Cross-entropy on which binding each register should have taken.
+
+        Free here for the same reason the gold program is free elsewhere: the generator
+        knows which binding holds the queried key.
+        """
+        tgt = torch.tensor(gold, device=lg.device)
+        return torch.nn.functional.cross_entropy(
+            lg.reshape(-1, lg.size(-1)), tgt.reshape(-1), ignore_index=-100)
+
+
+@dataclass
+class MemRegConfig2:
+    """Design 2: ``n_binding`` values in the context, only ``n_registers`` slots."""
+
+    n_keys: int = 16             # bindings in the context (the candidate set)
+    n_registers: int = 4         # slots available, deliberately fewer
+    digits: int = 2
+    ops: Tuple[str, ...] = OPS
+    seed: int = 0
+
+
+class MemRegTask2(MemRegTask):
+    """Same context, but the queried bindings must be *selected* into a small file.
+
+    The register slots the queried values land in are **drawn**, not fixed. Assigning them
+    to slots 0 and 1 would make the program's pointer the constant ``(0, 1)`` and the whole
+    thing would measure selection only, with the program degenerate. That is the third time
+    this degeneracy has had to be designed out (ROADMAP 3a-xv, and design 1 above).
+    """
+
+    def __init__(self, cfg2: MemRegConfig2):
+        self.cfg2 = cfg2
+        super().__init__(MemRegConfig(n_keys=cfg2.n_keys, digits=cfg2.digits,
+                                      n_query=2, ops=cfg2.ops, seed=cfg2.seed))
+
+    def sample2(self, seed: int, n_binding: Optional[int] = None) -> Dict:
+        c2 = self.cfg2
+        rng = random.Random(seed ^ 0x5EED)
+        n = n_binding or c2.n_keys
+        n = max(2, min(n, c2.n_keys))
+        keys = list(range(c2.n_keys))
+        rng.shuffle(keys)
+        keys = keys[:n]
+        vals = [self._value(rng) for _ in keys]
+        qi = rng.sample(range(n), 2)                  # positions in the context
+        slots = rng.sample(range(c2.n_registers), 2)  # where they must be loaded
+        op = rng.choice(c2.ops)
+        a, b = vals[qi[0]], vals[qi[1]]
+        # Unqueried slots carry ``-100``, the ignore index: supervising them toward a
+        # drawn binding injects irreducible noise into the loss for no reason, since
+        # which filler a spare slot holds is genuinely arbitrary.
+        sel = [-100] * c2.n_registers
+        sel[slots[0]], sel[slots[1]] = qi[0], qi[1]
+        return {
+            "keys": keys, "vals": vals, "query": (keys[qi[0]], op, keys[qi[1]]),
+            "sel": sel, "ptr": (slots[0], slots[1]), "op": c2.ops.index(op),
+            "answer": a + b if op == "+" else a - b,
+            "distance": n - min(qi), "n": n,
+        }
+
+    def candidate_codes(self, eps: Sequence[Dict], alg, sysm, device: str = "cpu"):
+        """``(B, N, K, P)`` exact codes for every binding, padded over short contexts."""
+        n = self.cfg2.n_keys
+        flat, = [[v for e in eps for v in (list(e["vals"]) + [0] * (n - len(e["vals"])))]]
+        codes = alg.pack(sysm.split(sysm.onehot(flat, device)))
+        return codes.view(len(eps), n, codes.shape[-2], codes.shape[-1])
+
+    def gold2(self, eps: Sequence[Dict]):
+        return ([e["sel"] for e in eps],
+                [[(e["op"], e["ptr"][0], e["ptr"][1])] for e in eps])
+
+
+class MemRegTrainer2:
+    """Design 2 end to end: select into a small file, then compute exactly.
+
+    Three losses, all free from the generator: which binding each slot should take, the
+    program over the slots, and the answer's residues. The answer loss reaches both heads
+    through exact arithmetic, so the selection is correctable by the result being wrong.
+    """
+
+    def __init__(self, cfg2: MemRegConfig2, model_cfg, n_latent: int = 8, loops: int = 3,
+                 lr: float = 3e-4, device: str = "cpu", moduli=(16, 25, 27, 11, 37),
+                 select_coef: float = 1.0, program_coef: float = 1.0):
+        from .algebra import ResidueAlgebra, ResidueSystem
+        from .lotus import LotusReasoner
+        from .model.lamb import build_model
+        from .regmachine import RegisterFile, RegisterMachine
+
+        torch.manual_seed(cfg2.seed)
+        self.cfg2, self.device = cfg2, device
+        self.task = MemRegTask2(cfg2)
+        self.sys = ResidueSystem(tuple(moduli))
+        self.alg = ResidueAlgebra(self.sys, device=device)
+        tok = ArithmeticTokenizer(n_keys=cfg2.n_keys)
+        model_cfg.vocab_size = tok.vocab_size
+        if n_latent < cfg2.n_registers + 1:
+            raise ValueError(f"n_latent={n_latent} must hold {cfg2.n_registers} selection "
+                             f"slots plus 1 instruction")
+        self.core = LotusReasoner(build_model(model_cfg, tok), n_latent, loops).to(device)
+        self.loader = SelectiveLoader(model_cfg.d_model, cfg2.n_registers,
+                                      cfg2.n_keys).to(device)
+        self.machine = RegisterMachine(model_cfg.d_model, cfg2.n_registers, 1,
+                                       self.sys, device=device).to(device)
+        self._RF = RegisterFile
+        self.opt = torch.optim.AdamW(
+            list(self.core.parameters()) + list(self.loader.parameters())
+            + list(self.machine.parameters()), lr=lr, weight_decay=0.01)
+        self.select_coef, self.program_coef = select_coef, program_coef
+        self._seed = cfg2.seed * 10_000
+
+    def _batch(self, n: int, n_binding: Optional[int] = None):
+        eps = []
+        for _ in range(n):
+            self._seed += 1
+            eps.append(self.task.sample2(self._seed, n_binding))
+        return eps
+
+    def _forward(self, eps, tau: float = 0.0, hard: bool = False):
+        from .regmachine import execute
+
+        prompt = self.task.collate(eps, self.device)
+        m = self.core.model
+        x = m.embed(prompt["input_ids"], prompt["abacus_ids"],
+                    prompt["value"], prompt["value_mask"])
+        _, _, latent_h, _ = self.core.latent_block(x, prompt["pad_mask"])
+        codes = self.task.candidate_codes(eps, self.alg, self.sys, self.device)
+        loaded, sel_lg = self.loader.load(latent_h, codes, tau, hard)
+
+        # The loaded registers *are* the file. Built by hand rather than through
+        # RegisterFile's integer constructor, because their contents are distributions
+        # over selected candidates and not exact integers.
+        R = self.cfg2.n_registers
+        regs = self._RF(self.sys, [[0] * R] * len(eps), self.device, n_total=R + 1)
+        regs.packed = torch.cat(
+            [loaded, torch.zeros_like(loaded[:, :1])], dim=1)
+        regs.n_filled = R
+        h_prog = latent_h[:, R:]
+        op_l, a_l, b_l = self.machine.logits(h_prog)
+        # ``[:, 0]`` because ``execute`` takes pointers as ``(B, R)`` for one instruction;
+        # the logits carry an instruction axis that has to be indexed away first.
+        ow, pa, pb = (self.machine._select(z[:, 0], tau, hard)
+                      for z in (op_l, a_l, b_l))
+        regs.append(execute(self.machine.alg, regs, ow, pa, pb, self.machine.ops))
+        return regs, (op_l, a_l, b_l), sel_lg
+
+    def train_step(self, batch: int = 64) -> Dict[str, float]:
+        self.core.train(); self.loader.train(); self.machine.train()
+        eps = self._batch(batch)
+        regs, logits, sel_lg = self._forward(eps)
+        sel_gold, prog_gold = self.task.gold2(eps)
+        sel = self.loader.select_loss(sel_lg, sel_gold)
+        prog = self.machine.program_loss(logits, prog_gold)
+        tgt = self.sys.targets([e["answer"] for e in eps], device=self.device)
+        out_reg = self.cfg2.n_registers
+        ans = sum(torch.nn.functional.nll_loss(
+                      torch.log(b[:, out_reg].clamp_min(1e-9)), tgt[:, k])
+                  for k, b in enumerate(regs.blocks)) / len(regs.blocks)
+        loss = self.select_coef * sel + self.program_coef * prog + ans
+        self.opt.zero_grad(set_to_none=True)
+        loss.backward()
+        if not torch.isfinite(loss):
+            raise FloatingPointError(f"non-finite loss: {float(loss)}")
+        torch.nn.utils.clip_grad_norm_(
+            list(self.core.parameters()) + list(self.loader.parameters())
+            + list(self.machine.parameters()), 1.0)
+        self.opt.step()
+        return {"loss": float(loss.detach()), "select": float(sel.detach()),
+                "program": float(prog.detach()), "answer": float(ans.detach())}
+
+    @torch.no_grad()
+    def accuracy(self, n: int = 256, n_binding: Optional[int] = None) -> Dict:
+        self.core.eval(); self.loader.eval(); self.machine.eval()
+        eps = self._batch(n, n_binding)
+        regs, logits, sel_lg = self._forward(eps)
+        out_reg = self.cfg2.n_registers
+        got = regs.decode(out_reg)
+        answers = [e["answer"] for e in eps]
+        sel_gold, _ = self.task.gold2(eps)
+        # Selection accuracy on the two slots that matter; the filler slots are noise.
+        hit = 0
+        pick = sel_lg.argmax(-1)
+        for i, e in enumerate(eps):
+            s0, s1 = e["ptr"]
+            hit += int(int(pick[i, s0]) == e["sel"][s0]
+                       and int(pick[i, s1]) == e["sel"][s1])
+        conf = torch.stack([b[:, out_reg].max(-1).values for b in regs.blocks]).mean(0)
+        keep = [i for i in range(len(eps)) if float(conf[i]) >= 0.9]
+        by_d: Dict[int, List[int]] = {}
+        for i, e in enumerate(eps):
+            by_d.setdefault(e["distance"], []).append(int(got[i] == answers[i]))
+        return {"acc": sum(1 for g, a in zip(got, answers) if g == a) / len(answers),
+                "select_acc": hit / len(eps),
+                "conf_cover": len(keep) / len(eps),
+                "acc_conf": (sum(1 for i in keep if got[i] == answers[i]) / len(keep))
+                            if keep else float("nan"),
+                "by_distance": {d: sum(v) / len(v) for d, v in sorted(by_d.items())}}

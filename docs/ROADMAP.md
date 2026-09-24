@@ -1958,10 +1958,36 @@ fixed address.
 
 That sharpens what the honest version has to be. Retrieval only exists where there are
 **more bindings than registers**, so something must choose which values occupy the file.
-That is design 2 above, it is the one that earns the name infContext, and it inherits
-3a-vi's wall: whatever chooses has to hand the fixed encoder digits rather than an
-embedding. The version measured here was design 1, and design 1 is now known to be
-either unlearnable (order-indexed) or vacuous (key-indexed).
+That is design 2, and design 1 is now known to be either unlearnable (order-indexed) or
+vacuous (key-indexed).
+
+**Design 2 was built and it fails for the same reason.** 16 bindings, 4 register slots, a
+`SelectiveLoader` emitting one distribution per slot over the candidates, selection over
+*positions* so the fixed map still does all the encoding and 3a-vi's wall is untouched.
+The gold selection plus gold program executes 8/8 exactly, so the task is well posed.
+4000 steps, memory and memoryless:
+
+| arm | accuracy | selection accuracy | `sel_loss` |
+| --- | --- | --- | --- |
+| `use_memory=True` | 0.008 | 0.004 | 2.774 |
+| memoryless | 0.008 | 0.000 | 2.773 |
+
+`ln(16) = 2.7726`. **The selection distribution is exactly uniform for the entire run**:
+not slow learning, no learning. And the reason is the one design 1 died of. The head emits
+a distribution over *candidate index*, index is presentation order, so selecting the
+binding for `@4` still means knowing it was the third one. Moving the choice from the
+pointer to the loader relocated the counting problem without solving it.
+
+**The fix this identifies.** Selection must be a pointer into the *sequence*, scored from
+the hidden state at each binding's position, rather than an index into an abstract
+candidate list. Then "where was `@4` bound" is an attention operation, which is the one
+thing the architecture is already good at, and the loader reads the digits at the chosen
+position. That is a pointer network over context positions and it is not built.
+
+One flaw of mine in the above, which does not explain the result but should not stand: the
+unqueried register slots were supervised toward a randomly drawn binding on every sample,
+injecting irreducible noise. With two of four slots random the floor would be ~1.386, and
+the observed 2.773 is uniform on *all* slots, so the noise was not what pinned it.
 
 One thing did transfer. The refusal signal of 3a-xix works on a *retrieval* failure and
 not only an arithmetic one: at 0.176 accuracy it accepted 0.2% of problems and was right
