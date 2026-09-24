@@ -303,7 +303,9 @@ class LotusTrainer:
                                      weight_decay=cfg.weight_decay)
         self.grammar = TaskGrammar()
         self.verifier = Verifier()
-        self.descriptor = Descriptor(depth=cfg.depth, digits=cfg.digits, ops_key=cfg.ops_key)
+        self.descriptor = Descriptor(depth=cfg.depth, digits=cfg.digits,
+                                    ops_key=cfg.ops_key,
+                                    shape=getattr(cfg, "shape", 0))
         self.max_ans = cfg.max_answer_len()
         self._seed = cfg.seed * 1_000_003 + 1
         self.truncated = 0   # traces that did not fit in n_latent (diagnostic)
@@ -321,7 +323,7 @@ class LotusTrainer:
         for _ in range(n):
             self._seed += 1
             d = Descriptor(self.cfg.depth, widths[self._seed % len(widths)],
-                           self.cfg.ops_key)
+                           self.cfg.ops_key, getattr(self.cfg, "shape", 0))
             out.append(self.grammar.sample_with_trace(d, self._seed,
                                                       exclude_heldout=True))
         return out
@@ -336,7 +338,8 @@ class LotusTrainer:
         """
         rng = random.Random(self.cfg.seed * 7 + 12345 + 101 * (digits or 0))
         desc = (self.descriptor if digits is None
-                else Descriptor(self.cfg.depth, digits, self.cfg.ops_key))
+                else Descriptor(self.cfg.depth, digits, self.cfg.ops_key,
+                                getattr(self.cfg, "shape", 0)))
         out: List[Task] = []
         seen = set()
         for _ in range(400 * max(1, n)):          # bounded: small spaces may exhaust

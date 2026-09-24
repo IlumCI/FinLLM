@@ -239,6 +239,12 @@ class LotusConfig:
     # Task space (matched to CoconutConfig so the two arms are comparable).
     depth: int = 2
     digits: int = 1
+    # 0 keeps the balanced tree; 1 draws unbalanced ones, so operand and instruction
+    # counts vary per problem. Required for any claim about program *induction*: a
+    # balanced tree of depth D has exactly one post-order traversal, so the pointer
+    # structure is identical for every problem and the model is recalling a constant
+    # (measured: 1 pattern at shape 0, 25 at shape 1 depth 4, 118 at depth 5).
+    shape: int = 0
     # 0 -> (+,-); 1 -> (+,-,*); 2 -> (+,-,*,/). Division is exact by construction:
     # the grammar picks divisor and quotient and multiplies, rather than rejecting
     # until a random pair happens to divide. It needs rational registers

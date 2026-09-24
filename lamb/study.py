@@ -65,9 +65,11 @@ class TaskSpec:
     ops_key: int
     n_latent: int
     space: float          # analytic size of the expression space, for context
+    shape: int = 0
 
     def label(self) -> str:
-        return f"d{self.depth}g{self.digits}o{self.ops_key}"
+        tail = "" if self.shape == 0 else f"s{self.shape}"
+        return f"d{self.depth}g{self.digits}o{self.ops_key}{tail}"
 
 
 TASKS: Dict[str, TaskSpec] = {
@@ -83,6 +85,11 @@ TASKS: Dict[str, TaskSpec] = {
     # division at all. The leaf count is ~390 (300 for +,-,* and 90 constructed
     # exact quotients), so depth 2 is ~390^2 * 4.
     "d2g1d": TaskSpec(depth=2, digits=1, ops_key=2, n_latent=8, space=6.1e5),
+    # Unbalanced trees, so the program's *structure* varies per problem. Every claim
+    # about program induction before this was measured on a task with exactly one
+    # pointer pattern, i.e. on constant recall (3a-xv).
+    "d3g1s": TaskSpec(depth=3, digits=1, ops_key=0, n_latent=16, shape=1, space=1.3e10),
+    "d4g1s": TaskSpec(depth=4, digits=1, ops_key=0, n_latent=32, shape=1, space=1.6e20),
 }
 
 # Wall-clock cost per training step, measured on this box at d_model=96, batch 64,
@@ -226,7 +233,7 @@ def _run_one(job: Tuple[str, str, int, int, int, int]) -> Dict[str, object]:
             steps = int(round(steps * COMPUTE_MATCH))
         cfg = CoconutConfig(steps=steps, batch_size=batch_size, seed=seed,
                             depth=spec.depth, digits=spec.digits, ops_key=spec.ops_key,
-                            device=device)
+                            shape=spec.shape, device=device)
         tr = CoconutTrainer(cfg, tok, mcfg)
         for s in range(steps):
             tr._train_step(s)
@@ -245,6 +252,7 @@ def _run_one(job: Tuple[str, str, int, int, int, int]) -> Dict[str, object]:
         redundant = REDUNDANT_MODULI if arm.endswith("-redundant") else None
         cfg = LotusConfig(steps=steps, batch_size=batch_size, seed=seed,
                           depth=spec.depth, digits=spec.digits, ops_key=spec.ops_key,
+                          shape=spec.shape,
                           n_latent=spec.n_latent, loops=3,
                           trace_coef=0.0, alu_coef=0.0, alu_consistency_coef=0.0,
                           alu_moduli=REGMACHINE_MODULI,

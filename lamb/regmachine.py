@@ -484,7 +484,11 @@ class RegMachineTrainer:
         # while leaving the program that references it intact. Prepending shifts every
         # index by exactly one, operands and results alike, because results begin
         # immediately after the operand block in both layouts.
-        self.n_const = 1 if self.n_instr > self.gold_instr else 0
+        # Unbalanced trees vary the operand *and* instruction count per problem, so
+        # the file is padded to the maximum and the identity register is always
+        # needed for the short programs.
+        self.variable = bool(getattr(cfg, "shape", 0))
+        self.n_const = 1 if (self.variable or self.n_instr > self.gold_instr) else 0
         self.n_operands = self.n_const + 2 ** cfg.depth
         if cfg.n_latent < self.n_instr:
             raise ValueError(f"n_latent={cfg.n_latent} < {self.n_instr} instructions "
@@ -608,17 +612,27 @@ class RegMachineTrainer:
         # integer ``OPS`` here is what made the grammar's own division output
         # (``ops_key=2``) unconsumable: ``OPS.index("/")`` raises, so the only
         # program trainer in the repo crashed on data that generates correctly.
-        golds = [gold_program(t, ops=self.machine.ops)[0] for t in trees]
-        vals = [operands(t) for t in trees]
-        if self.n_const:
-            k = self.n_const
-            golds = [[(op, ra + k, rb + k) for op, ra, rb in g] for g in golds]
-            vals = [[1] + v for v in vals]
-            mul = self.machine.ops.index("*")
-            for g in golds:
-                while len(g) < self.n_instr:
-                    # multiply the last written register through the constant 1
-                    g.append((mul, self.n_operands + len(g) - 1, 0))
+        k, n_op = self.n_const, self.n_operands
+        mul = self.machine.ops.index("*")
+        golds, vals, counts = [], [], []
+        for t in trees:
+            g = gold_program(t, ops=self.machine.ops)[0]
+            leaves = operands(t)
+            m = len(leaves)
+            # ``gold_program`` indexes the *tree's* own space: operands 0..m-1, then
+            # results from m. The machine pads operands to a fixed width, so results do
+            # not sit immediately after them, and the remap is therefore not the uniform
+            # shift the balanced case allowed. Getting it wrong yields a program that
+            # reads a padding slot while still looking well-formed.
+            g = [(o, (k + a) if a < m else (n_op + a - m),
+                     (k + b) if b < m else (n_op + b - m)) for o, a, b in g]
+            while len(g) < self.n_instr:
+                g.append((mul, n_op + len(g) - 1, 0))      # x * 1, an exact identity
+            row = ([1] if k else []) + leaves
+            counts.append(len(row))
+            vals.append(row + [0] * (n_op - len(row)))
+            golds.append(g)
+        self._counts = counts
         answers = [int(a) for _, a, _ in tasks]
         keep = [self._in_ring(int(a), tr, v)
                 for (_, a, tr), v in zip(tasks, vals)]
@@ -650,7 +664,11 @@ class RegMachineTrainer:
     def _losses(self, tasks):
         trees, golds, vals, answers, keep = self._prepare(tasks)
         latent_h = self._latents(tasks)
-        regs, logits = self.machine.run(latent_h, vals, self.tau, self.hard)
+        # Per-row operand counts, so a pointer into a short program's padding is
+        # unrepresentable rather than merely penalised.
+        cnt = torch.tensor(self._counts, device=self.device)
+        regs, logits = self.machine.run(latent_h, vals, self.tau, self.hard,
+                                        counts=cnt)
         k = torch.tensor(keep, dtype=torch.float32, device=self.device)
         # Rows outside the ring are dropped from *both* losses so the arms see the same
         # data; rows without a gold program are dropped from the program loss only,
