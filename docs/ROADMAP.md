@@ -944,11 +944,15 @@ Depth 3, 5 seeds, `program_coef=0` throughout, GPU+CPU hybrid:
 | --- | --- | --- | --- | --- |
 | `answer-only` (control) | 0.011 | 0.009 | 0.862 | — |
 | `answer-only-gumbel` | 0.023 | 0.010 | **0.996** | commitment supplied |
-| `answer-only-commit` | ~~0.024~~ | — | **nan** | **void, see below** |
+| `answer-only-commit` (re-run, fixed) | 0.021 | 0.006 | 0.941 | commitment supplied |
+| ~~`answer-only-commit` (original)~~ | ~~0.024~~ | — | **nan** | **void, see below** |
 
 **Straight-through Gumbel made the pointers sharp -- 0.996 against the control's 0.862 --
 and accuracy did not move: 0.023 against 0.011, permutation *p* = 0.087, CI crossing
-zero.** The fork resolves to *symptom*. Commitment is not the missing ingredient, and
+zero.** The entropy arm, re-run correctly, lands in the same place: `ptr_sharp` 0.941,
+accuracy 0.021. Both interventions supply commitment; neither supplies competence. The
+~0.01 they add is at the edge of what 5 seeds resolves and is irrelevant against a gap of
+0.985. The fork resolves to *symptom*. Commitment is not the missing ingredient, and
 the outcome gradient does not locate a correct program at seven instructions even when
 it is handed a decision.
 
@@ -978,6 +982,13 @@ The mechanism is worth writing down because every layer of it looked fine:
 So a destroyed model produced a statistically significant result, and the only symptom
 anywhere in the output was `ptr_sharp` reading `nan` -- a metric that exists because
 3a-xii needed it, added for an unrelated reason a few hours earlier.
+
+**And the accuracy could not have caught it.** Re-run with the fix, the arm gives
+**0.021** against the void run's **0.024**. At near-zero accuracy a destroyed model and a
+working one are indistinguishable, because both are decoding noise -- so the number that
+would normally expose a broken run was, here, almost exactly right. That is the general
+hazard: a metric only detects a fault when the fault would move it, and in a failing
+regime almost nothing moves it.
 
 Two fixes. The entropy is computed on `log_softmax(...).clamp_min(-30)` rather than
 `nan_to_num`, so both passes stay finite and the masked terms contribute ~1e-13 x -30.
