@@ -25,6 +25,12 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=7.0", "maturin>=1.7"]
+# The language bridge only. Kept out of the core dependencies deliberately: every
+# arithmetic number in this repo was produced under the pinned environment below,
+# torch moves accuracy on a model this small between minor versions, and a text
+# front-end should not be able to shift the ground under a measurement it has
+# nothing to do with. `uv sync --extra bridge` when you want GSM8K.
+bridge = ["transformers>=4.40"]
 
 [project.scripts]
 lamb-train = "lamb.train:main"
@@ -38,6 +44,7 @@ lamb-latent-rl = "lamb.latent_rl:main"
 lamb-comm = "lamb.comm:main"
 lamb-comm-transfer = "lamb.comm_transfer:main"
 lamb-comm-pop = "lamb.comm_pop:main"
+lamb-bridge = "lamb.bridge_train:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["lamb"]

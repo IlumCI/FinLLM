@@ -57,6 +57,15 @@ def parse_expr(expr: str) -> Tree:
     inference is reading the question rather than peeking at the key. The grammar
     emits either ``a<op>b`` or ``(L)<op>(R)``, and operands are non-negative, so a
     top-level operator is unambiguous.
+
+    ``/`` is accepted here because the grammar emits it (``ops_key=2``). Parsing it
+    and composing it are different questions: the integer :class:`ResidueAlgebra`
+    has no division at all -- an inverse needs a divisor coprime to every modulus,
+    and the short-digit-period moduli are exactly the set that denies that -- so a
+    ``/`` tree belongs to :class:`lamb.regmachine.RegisterMachine` with
+    ``rational=True``, and reaches :class:`LatentALU` only as an error. Leaving the
+    parser unable to read it was worse: it made the grammar's own output
+    unparseable, so division data existed and nothing could consume it.
     """
     expr = expr.strip()
     if expr.startswith("("):
@@ -71,7 +80,7 @@ def parse_expr(expr: str) -> Tree:
         op = expr[i + 1]
         return (op, parse_expr(expr[1:i]), parse_expr(expr[i + 3:-1]))
     for j, c in enumerate(expr):
-        if c in "+-*" and j > 0:
+        if c in "+-*/" and j > 0:
             return (c, int(expr[:j]), int(expr[j + 1:]))
     raise ValueError(f"cannot parse {expr!r}")
 
@@ -160,6 +169,14 @@ class ScalarALU(nn.Module):
         op, l, r = t
         a = self._from_leaves(row, l, pairs)
         b = self._from_leaves(row, r, pairs)
+        if op not in ("+", "-", "*"):
+            # ``parse_expr`` accepts ``/`` because the grammar emits it; this arm
+            # cannot execute it. A named refusal beats the ``KeyError`` the dict
+            # lookup used to raise, which reads like a bug in the ALU rather than an
+            # unsupported instruction set. The residue arm says the same thing from
+            # ``ResidueAlgebra.compose_blocks``.
+            raise ValueError(f"the scalar ALU has no {op!r}; use "
+                             f"RegisterMachine(rational=True)")
         return {"+": a + b, "-": a - b, "*": a * b}[op]
 
     def compose_tree(self, vals: torch.Tensor, trees: Sequence[Tree]) -> torch.Tensor:

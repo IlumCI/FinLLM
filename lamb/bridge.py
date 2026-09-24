@@ -150,17 +150,197 @@ class LanguageFront(nn.Module):
         return self.resampler(enc, pad_mask)
 
 
+# Constants that a word problem needs but never writes down. "Half as many",
+# "twice", "a third", "20% off" all name an operation whose *other* operand is
+# implicit, and the parser cannot see it because it is not in the text. Preloading
+# them as registers keeps the decision in the program -- ``x / 2`` rather than a
+# parser deciding that "half" means 0.5 -- which is the same argument the percent
+# flag already makes, and the same reason the register machine exists at all.
+# 1/2/3/100 are the *operation* constants: "half as many", "a third", "20% off" each
+# name an operation whose other operand is never written down.
+#
+# 60/24/7/12/52/1000 are *unit* constants, and they are here because of a measurement,
+# not a hunch. Categorising what still failed to align after compound decomposition
+# found **59.6% of the remainder needed an integer that is nowhere in the problem** --
+# "Weng earns $12 an hour ... 50 minutes" requires 60, and no parser can extract a
+# number the text does not contain. Adding them moved coverage 0.614 -> 0.680.
+#
+# **They are only safe with a wider register file, and this is the sharp edge.** At
+# ``n_operands=12`` these same constants *halve* coverage (0.614 -> 0.249) because 97%
+# of rows fill the file and real quantities get pushed out of it. Constants and file
+# width are one decision, not two: see ``BridgeConfig.n_operands``.
+DEFAULT_CONSTANTS: Tuple[int, ...] = (1, 2, 3, 100, 60, 24, 7, 12, 52, 1000)
+
+
 def registers_from_quantities(quantities: Sequence[Sequence[Quantity]],
-                              n_registers: int) -> Tuple[List[List[int]], List[int]]:
+                              n_registers: int,
+                              constants: Sequence[int] = ()
+                              ) -> Tuple[List[List[int]], List[List[int]], List[int]]:
     """Operand register file from the text's numbers, padded to a fixed width.
 
-    Returns the integer values and how many were real, so the program's pointer
-    mask can be told which registers hold a quantity and which are padding -- a
+    Returns ``(values, scales, counts)``: the scaled integers, the power of ten each
+    was scaled by, and how many were real -- the last so the program's pointer mask
+    can be told which registers hold a quantity and which are padding, since a
     program that points at a slot no number went into is not a worse program.
+
+    **The scale is returned because dropping it was the bug this whole layer exists
+    to prevent.** This function used to return ``[q.value for q in qs]``, so ``3.25``
+    entered the register file as the integer ``325`` and ``7`` as ``7``, and adding
+    them gave ``332``. That is exactly the mixed-scale failure :mod:`lamb.rational`
+    was written to kill -- *"a confidently wrong number is worse than a missing
+    feature"* -- reintroduced at the one seam where nothing downstream could catch
+    it. :meth:`lamb.rational.RationalAlgebra.encode_scaled` is the join that
+    consumes both lists, and a scale there is simply a denominator.
+
+    ``percent`` is deliberately *not* resolved here. ``20%`` is neither the number
+    20 nor the number 0.2 until the program says which, and with ``1`` and ``100``
+    available as constant registers that decision is expressible as a program --
+    which is where it belongs. :func:`quantity_percent_flags` surfaces it.
+
+    ``constants`` occupy the *first* slots, so their addresses are the same in every
+    row and a pointer that learns "register 1 is two" learns something stable. The
+    real-operand count includes them, since they are as readable as any quantity.
     """
-    vals, counts = [], []
+    cs = list(constants)
+    room = n_registers - len(cs)
+    if room < 0:
+        raise ValueError(f"{len(cs)} constants do not fit in {n_registers} registers")
+    vals, scales, counts = [], [], []
     for qs in quantities:
-        v = [q.value for q in qs][:n_registers]
-        counts.append(len(v))
-        vals.append(v + [0] * (n_registers - len(v)))
-    return vals, counts
+        picked = list(qs)[:room]
+        counts.append(len(cs) + len(picked))
+        pad = room - len(picked)
+        vals.append(cs + [q.value for q in picked] + [0] * pad)
+        # Padding is 0/10**0 == 0, an ordinary representable value, so a masked
+        # pointer that leaks weight onto a pad slot contributes a real zero rather
+        # than an undefined one.
+        scales.append([0] * len(cs) + [q.scale for q in picked] + [0] * pad)
+    return vals, scales, counts
+
+
+def quantity_percent_flags(quantities: Sequence[Sequence[Quantity]],
+                           n_registers: int,
+                           constants: Sequence[int] = ()) -> List[List[bool]]:
+    """Which register slots came from a ``%`` literal, aligned to the register file.
+
+    Takes ``constants`` for the same reason :func:`registers_from_quantities` does:
+    the flags have to line up with the slots, and a flag list that is off by the
+    number of constants is worse than no flags at all.
+    """
+    n_const = len(list(constants))
+    room = n_registers - n_const
+    out = []
+    for qs in quantities:
+        picked = list(qs)[:room]
+        out.append([False] * n_const + [q.percent for q in picked]
+                   + [False] * (room - len(picked)))
+    return out
+
+
+# -- lexical quantities ----------------------------------------------------
+# Written cardinals only. "twice", "half" and "a third" are *operations* whose
+# other operand is implicit, and they are served by DEFAULT_CONSTANTS plus the
+# instruction set rather than by the parser inventing a number -- the same split
+# the percent flag makes. What is left here is unambiguous: "three" is 3 wherever
+# it appears, and leaving it invisible means a problem whose quantities are partly
+# spelled out has an incomplete register file, which no program can recover from.
+_LEXICAL: dict = {
+    "zero": 0, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6,
+    "seven": 7, "eight": 8, "nine": 9, "ten": 10, "eleven": 11, "twelve": 12,
+    "thirteen": 13, "fourteen": 14, "fifteen": 15, "sixteen": 16,
+    "seventeen": 17, "eighteen": 18, "nineteen": 19, "twenty": 20,
+    "thirty": 30, "forty": 40, "fifty": 50, "sixty": 60, "seventy": 70,
+    "eighty": 80, "ninety": 90, "hundred": 100, "thousand": 1000,
+    "dozen": 12, "couple": 2, "pair": 2,
+}
+_LEXICAL_RE = re.compile(r"\b(" + "|".join(sorted(_LEXICAL, key=len, reverse=True))
+                         + r")\b", re.IGNORECASE)
+
+
+def extract_lexical_quantities(text: str) -> List[Quantity]:
+    """Written cardinals as :class:`Quantity`, with their spans.
+
+    ``"a"``/``"an"`` are deliberately absent. They mean one often enough to be
+    tempting and mean nothing often enough ("a discount", "an hour later") that
+    admitting them would flood the register file with ones and push real quantities
+    out of it, which is the failure mode that costs the most: a program cannot be
+    right about a number that is not there.
+    """
+    return [Quantity(value=_LEXICAL[m.group(1).lower()], scale=0,
+                     start=m.start(), end=m.end(), percent=False)
+            for m in _LEXICAL_RE.finditer(text)]
+
+
+def all_quantities(text: str, lexical: bool = True,
+                   max_decimals: int = 2) -> List[Quantity]:
+    """Digit and (optionally) written quantities, in the order they appear."""
+    out = list(extract_quantities(text, max_decimals=max_decimals))
+    if lexical:
+        out.extend(extract_lexical_quantities(text))
+    return sorted(out, key=lambda q: q.start)
+
+
+# -- the frozen encoder, run once -----------------------------------------
+DEFAULT_ENCODER = "sentence-transformers/all-MiniLM-L6-v2"
+
+
+def encode_dataset(texts: Sequence[str], encoder: str = DEFAULT_ENCODER,
+                   out_path: Optional[str] = None, max_len: int = 192,
+                   batch_size: int = 32, device: str = "cpu") -> dict:
+    """Run the frozen encoder over a dataset **once** and cache its token states.
+
+    This is the step the rest of this module has always assumed and never had. The
+    encoder is frozen, so its outputs are a function of the dataset alone; computing
+    them per training step would pay for the largest model in the system on every
+    batch, to recompute a constant. Cached, the expensive model never participates
+    in training at all, which is what makes this affordable on hardware that could
+    not train it -- and why everything else here takes embeddings rather than text.
+
+    Token states, not the pooled sentence vector: the resampler cross-attends, so
+    collapsing the problem to one vector before it gets there would throw away the
+    structure it is there to read.
+
+    ``truncated`` is returned rather than logged away. A problem whose question was
+    cut off is not a hard problem, it is a different problem, and an accuracy that
+    silently includes a few hundred of them is not measuring what it claims to.
+    """
+    try:
+        import torch as _torch
+        from transformers import AutoModel, AutoTokenizer
+    except ImportError as exc:                                   # pragma: no cover
+        raise ImportError(
+            "the language bridge needs `transformers`; it is an optional extra so "
+            "that the pinned CPU environment behind every arithmetic number in this "
+            "repo does not move underneath it. Install with: uv sync --extra bridge"
+        ) from exc
+
+    tok = AutoTokenizer.from_pretrained(encoder)
+    model = AutoModel.from_pretrained(encoder).to(device).eval()
+    model.requires_grad_(False)                # frozen means frozen, not "untouched"
+
+    n_trunc = 0
+    chunks, masks = [], []
+    with _torch.no_grad():
+        for i in range(0, len(texts), batch_size):
+            batch = list(texts[i:i + batch_size])
+            raw = tok(batch, add_special_tokens=True)["input_ids"]
+            n_trunc += sum(1 for ids in raw if len(ids) > max_len)
+            enc = tok(batch, padding="max_length", truncation=True,
+                      max_length=max_len, return_tensors="pt").to(device)
+            h = model(**enc).last_hidden_state                   # (b, T, d_enc)
+            chunks.append(h.to(_torch.float16).cpu())
+            masks.append((enc["attention_mask"] == 0).cpu())     # True at padding
+    out = {
+        "enc": _torch.cat(chunks),
+        "pad_mask": _torch.cat(masks),
+        "meta": {"encoder": encoder, "max_len": max_len, "n": len(texts),
+                 "d_enc": int(chunks[0].shape[-1]), "truncated": n_trunc},
+    }
+    if out_path:
+        _torch.save(out, out_path)
+    return out
+
+
+def load_encoded(path: str) -> dict:
+    """Read a cache written by :func:`encode_dataset`."""
+    return torch.load(path, map_location="cpu", weights_only=False)

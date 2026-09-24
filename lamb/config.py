@@ -174,7 +174,7 @@ class CoconutConfig:
     # scratchpad can help). Depth 2 = ``(a op b) op (c op d)``.
     depth: int = 2
     digits: int = 1
-    ops_key: int = 0             # 0 -> (+,-); 1 -> (+,-,*)
+    ops_key: int = 0             # 0 -> (+,-); 1 -> (+,-,*); 2 -> (+,-,*,/)
 
     # Latent thought budget. Randomising it over training makes accuracy robust
     # to the test-time budget (the recurrent-depth recipe, applied to thoughts),
@@ -239,6 +239,12 @@ class LotusConfig:
     # Task space (matched to CoconutConfig so the two arms are comparable).
     depth: int = 2
     digits: int = 1
+    # 0 -> (+,-); 1 -> (+,-,*); 2 -> (+,-,*,/). Division is exact by construction:
+    # the grammar picks divisor and quotient and multiplies, rather than rejecting
+    # until a random pair happens to divide. It needs rational registers
+    # (``RegMachineTrainer(rational=True)``) -- the integer ring has no division at
+    # all, because an inverse needs a divisor coprime to every modulus and the
+    # short-digit-period moduli are exactly the set that denies that.
     ops_key: int = 0
     # Operand-width range for training. 0 means 'just `digits`'. A range is
     # what makes a width-extrapolation claim testable at all: the residue of
@@ -284,6 +290,11 @@ class LotusConfig:
     # digit-coefficient pattern repeats every ord_p(10) positions, so a long
     # order makes a modulus useless at the operand widths training reaches.
     alu_moduli: tuple = (2, 5, 9, 11, 7, 13, 37)
+    # The ring for the *rational* register file. ``None`` means
+    # ``lamb.rational.RATIONAL_MODULI``, which is wider because denominators
+    # multiply and never reduce -- ``alu_moduli`` (~1.7e6) is exhausted by two
+    # divisions, so the two rings cannot be the same knob.
+    rational_moduli: Optional[tuple] = None
     trace_coef: float = 0.5  # weight on per-position supervision (0 => answer-only ablation)
 
     # SWITCH-style boundary tokens (arXiv:2606.13106) wrapping the latent segment.

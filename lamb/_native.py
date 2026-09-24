@@ -21,26 +21,43 @@ except Exception:  # noqa: BLE001 - any failure means: fall back to Python
     USING_RUST = False
 
 
-def evaluate(expr: str) -> Optional[int]:
-    """Exact value of an integer expression, or ``None``.
+def _rust_handles(expr: str) -> bool:
+    """Can the compiled kernel be trusted with this expression?
 
     Division routes to the Python path even when the Rust kernels are present. The
-    compiled extension predates ``/`` and an already-installed build cannot be
-    assumed to know it, so dispatching on the operator is robust against a stale
-    ``.so`` in a way that rebuilding is not. It costs nothing measurable: problem
-    generation profiles at 0.2% of a training step.
+    compiled extension predates ``/`` -- its lexer has no token for it -- and an
+    already-installed build cannot be assumed to know it, so dispatching on the
+    operator is robust against a stale ``.so`` in a way that rebuilding is not. It
+    costs nothing measurable: problem generation profiles at 0.2% of a training step.
+
+    **This is one predicate because it used to be two, and they drifted.** The guard
+    was written into :func:`evaluate` and not into :func:`verify`, so on any machine
+    with the extension built, ``verify("48/2", "24")`` reached a lexer that rejects
+    ``/`` and returned **False** -- scoring every division problem wrong and silently
+    corrupting the only reward signal the self-play loop has. CI runs the Python
+    backend, so nothing ever saw it. A condition restated in two places is a condition
+    that will disagree in one of them.
     """
-    if _rust is not None and "/" not in expr:
+    return _rust is not None and "/" not in expr
+
+
+def evaluate(expr: str) -> Optional[int]:
+    """Exact value of an integer expression, or ``None``."""
+    if _rust_handles(expr):
         return _rust.evaluate(expr)
     return _fallback.evaluate(expr)
 
 
 def verify(expr: str, answer: str) -> bool:
-    return _rust.verify(expr, answer) if _rust is not None else _fallback.verify(expr, answer)
+    if _rust_handles(expr):
+        return _rust.verify(expr, answer)
+    return _fallback.verify(expr, answer)
 
 
 def sample_problem(op: str, a_digits: int, b_digits: int, seed: int) -> Tuple[str, str]:
-    if _rust is not None:
+    # Same reasoning, on the operator rather than the expression: a kernel with no
+    # ``/`` token cannot generate a division problem either.
+    if _rust is not None and op != "/":
         return _rust.sample_problem(op, int(a_digits), int(b_digits), int(seed))
     return _fallback.sample_problem(op, a_digits, b_digits, seed)
 
@@ -52,4 +69,5 @@ def backend() -> str:
     return "rust" if USING_RUST else "python"
 
 
-__all__ = ["evaluate", "verify", "sample_problem", "TopKStore", "USING_RUST", "backend"]
+__all__ = ["evaluate", "verify", "sample_problem", "TopKStore", "USING_RUST",
+           "backend"]

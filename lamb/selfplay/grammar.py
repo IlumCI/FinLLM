@@ -67,9 +67,20 @@ class Descriptor:
     depth: int
     digits: int
     ops_key: int
+    # 0 keeps the balanced tree this grammar has always built; 1 draws an *unbalanced*
+    # one whose children may stop short of the depth budget.
+    #
+    # It is a separate axis rather than a change to ``depth`` because a balanced tree of
+    # depth D has exactly one post-order traversal, so the program's pointer structure
+    # is the *same* for every problem -- measured, one distinct pointer pattern across
+    # 300 depth-3 problems, with only the operators varying. A model on that task is not
+    # inducing a program, it is recalling a constant, and no claim about program
+    # induction (3a-vii, 3a-xii, 3a-xv) can be tested on it.
+    shape: int = 0
 
     def label(self) -> str:
-        return f"d{self.depth}g{self.digits}o{self.ops_key}"
+        tail = "" if self.shape == 0 else f"s{self.shape}"
+        return f"d{self.depth}g{self.digits}o{self.ops_key}{tail}"
 
 
 class TaskGrammar:
@@ -82,7 +93,29 @@ class TaskGrammar:
             return rng.randint(0, 9)
         return rng.randint(10 ** (d - 1), 10 ** d - 1)
 
-    def _build(self, depth: int, digits: int, ops: Sequence[str], rng: random.Random) -> str:
+    def _child_depths(self, depth: int, shape: int, rng: random.Random) -> Tuple[int, int]:
+        """Depths for the two children of an internal node.
+
+        **Consumes no randomness at ``shape == 0``.** The draw order in this grammar is
+        load-bearing: operands then operator, and anything that shifts RNG consumption
+        changes every problem produced for a given seed while looking like nothing.
+        ``tests/test_holdout.py`` pins the canonical seed-0 value against exactly that.
+        So the balanced path returns before touching ``rng``, and the new branch spends
+        its draws inside itself -- the same discipline division followed.
+
+        Both children are drawn **independently**, so ``depth`` is a ceiling rather than a
+        guarantee. The first version kept one child at the full budget and shortened the
+        other, which sounded tidier and produced almost nothing: asymmetry could then only
+        occur at the root, giving **3** distinct pointer patterns at depth 3 against the
+        balanced tree's 1. Drawing both compounds through the recursion instead, which is
+        where the variety comes from.
+        """
+        if shape == 0:
+            return depth - 1, depth - 1
+        return rng.randint(1, depth - 1), rng.randint(1, depth - 1)
+
+    def _build(self, depth: int, digits: int, ops: Sequence[str], rng: random.Random,
+               shape: int = 0) -> str:
         if depth <= 1:
             op = rng.choice(ops)
             if op == "/":
@@ -90,12 +123,14 @@ class TaskGrammar:
             else:
                 a, b = self._num(digits, rng), self._num(digits, rng)
             return f"{a}{op}{b}"
-        left = self._build(depth - 1, digits, ops, rng)
-        right = self._build(depth - 1, digits, ops, rng)
+        ld, rd = self._child_depths(depth, shape, rng)
+        left = self._build(ld, digits, ops, rng, shape)
+        right = self._build(rd, digits, ops, rng, shape)
         return f"({left}){rng.choice(ops)}({right})"
 
     def _build_traced(self, depth: int, digits: int, ops: Sequence[str],
-                      rng: random.Random) -> Tuple[str, int, List[int]]:
+                      rng: random.Random, shape: int = 0
+                      ) -> Tuple[str, int, List[int]]:
         """``(expr, value, trace)`` where ``trace`` is the sub-expression values in
         post-order, *excluding* the root (which is the answer)."""
         if depth <= 1:
@@ -109,8 +144,9 @@ class TaskGrammar:
             if op == "/":
                 a, b = _exact_division_operands(digits, rng, self._num)
             return f"{a}{op}{b}", _apply(op, a, b), []
-        lexpr, lval, ltrace = self._build_traced(depth - 1, digits, ops, rng)
-        rexpr, rval, rtrace = self._build_traced(depth - 1, digits, ops, rng)
+        ld, rd = self._child_depths(depth, shape, rng)
+        lexpr, lval, ltrace = self._build_traced(ld, digits, ops, rng, shape)
+        rexpr, rval, rtrace = self._build_traced(rd, digits, ops, rng, shape)
         op = rng.choice(ops)
         if op == "/" and (rval == 0 or lval % rval != 0):
             # An internal division's operands are already fixed by the subtrees, so
@@ -133,7 +169,8 @@ class TaskGrammar:
         rng = random.Random(seed)
         ops = self.ops_sets[descriptor.ops_key]
         for _ in range(32):  # resample on i128 overflow, or if it lands in the eval partition
-            expr, val, trace = self._build_traced(descriptor.depth, descriptor.digits, ops, rng)
+            expr, val, trace = self._build_traced(
+                descriptor.depth, descriptor.digits, ops, rng, descriptor.shape)
             if abs(val) >= _MAX_ABS or any(abs(t) >= _MAX_ABS for t in trace):
                 continue
             if exclude_heldout and is_heldout(expr):
@@ -152,7 +189,8 @@ class TaskGrammar:
         rng = random.Random(seed)
         ops = self.ops_sets[descriptor.ops_key]
         for _ in range(32):  # resample on overflow, or if it lands in the eval partition
-            expr = self._build(descriptor.depth, descriptor.digits, ops, rng)
+            expr = self._build(descriptor.depth, descriptor.digits, ops, rng,
+                               descriptor.shape)
             val = evaluate(expr)
             if val is None:
                 continue

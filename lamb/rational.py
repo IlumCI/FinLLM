@@ -47,6 +47,39 @@ from .algebra import ResidueAlgebra, ResidueSystem
 # a large product, which rationals need because denominators multiply.
 RATIONAL_MODULI: Tuple[int, ...] = (64, 125, 27, 11, 7, 13, 37, 101, 41, 271)
 
+# The same construction, sized from a *measurement* rather than from an argument.
+# RATIONAL_MODULI was sized by reasoning about the worst chain a grade-school problem
+# could produce (five two-decimal values, denominator 1e10). Simulating the actual
+# unreduced growth over the programs recovered from GSM8K's own calculator annotations
+# gives a real distribution: median worst |num|,|den| **120**, p99 3.8e6, p99.9 1.1e9,
+# and a single worst case of **2.16e11** over 4590 programs.
+#
+# This set gives +-1.66e13 -- a **77x** margin on that worst case -- and costs far less
+# than RATIONAL_MODULI: the packed path pads every modulus to the widest, so 9 moduli
+# at P=125 is 9*125^2 = 141k against 10*271^2 = 734k, **5.2x less arithmetic per
+# composition**, with the head width 426 units against 697. Every digit period is <= 6,
+# which is the constraint that rules out the otherwise-attractive alternatives: adding
+# 73 or 137 instead of 41 buys a larger ring at P=125-137 but pushes ``max_period`` to
+# 8, and a modulus whose digit-coefficient pattern needs 8 positions to repeat is
+# useless at the operand widths training actually sees.
+#
+# **This was 8 moduli and a 139x margin until the chains got longer.** Decomposing
+# GSM8K's compound annotations into instruction sub-chains (the change that lifted
+# program coverage 0.420 -> 0.614) roughly tripled the median chain length, and since
+# every operation multiplies denominators, the worst case moved 2.91e9 -> 2.16e11 and
+# the margin collapsed from 139x to **1.9x**. No program exceeded the ring even then,
+# so nothing failed and nothing would have failed visibly -- the next slightly longer
+# chain would simply have wrapped to a different number. Re-measuring after a change
+# that had nothing obviously to do with the ring is the only reason it was caught.
+#
+# Two limits on the measurement, since it is a sizing decision. It is taken over the
+# programs the annotations *describe*, so a model emitting a different program (say,
+# dividing repeatedly) is not bounded by it; and a soft, undecided program is not
+# bounded by anything, because its decoded denominator is an argmax over incoherent
+# residues. ``denominator_magnitude`` is still the monitor, and RATIONAL_MODULI is one
+# constructor argument away.
+GSM8K_MODULI: Tuple[int, ...] = (64, 125, 27, 11, 7, 13, 37, 101, 41)
+
 # A value is (numerator, denominator), each packed (..., K, P).
 Rat = Tuple[torch.Tensor, torch.Tensor]
 

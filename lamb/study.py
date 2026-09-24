@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import multiprocessing
 import os
 import random
 import statistics
@@ -78,6 +79,10 @@ TASKS: Dict[str, TaskSpec] = {
     "d3g1": TaskSpec(depth=3, digits=1, ops_key=0, n_latent=16, space=1.28e10),
     # multiplication unlocked
     "d2g1x": TaskSpec(depth=2, digits=1, ops_key=1, n_latent=8, space=2.7e5),
+    # division unlocked -- needs rational registers, since the integer ring has no
+    # division at all. The leaf count is ~390 (300 for +,-,* and 90 constructed
+    # exact quotients), so depth 2 is ~390^2 * 4.
+    "d2g1d": TaskSpec(depth=2, digits=1, ops_key=2, n_latent=8, space=6.1e5),
 }
 
 # Wall-clock cost per training step, measured on this box at d_model=96, batch 64,
@@ -94,17 +99,105 @@ ARMS = ("coconut", "coconut-long", "lotus-answer", "lotus-trace")
 # been shown to do anything yet. ``lotus-space`` adds the supervised-contrastive
 # term over the latent manifold (arXiv:2606.20075's second supervision dimension).
 EXTRA_ARMS = ("lotus-space", "lotus-alu")
-ALL_ARMS = ARMS + EXTRA_ARMS
+# The register machine: the latents emit a *program* and the algebra executes it.
+# These exist because ROADMAP 3a-vii -- the one learned claim still standing, and the
+# one the language bridge depends on -- was measured at n=1, at depth 2, over three
+# instructions, on ``(+,-)``. This file was built specifically to stop claims like
+# that, and had never been pointed at it.
+#
+# The question the pair asks is whether the *differentiable* executor is a capability
+# or a convenience: ``answer-only`` removes the gold program entirely, so the only
+# thing that can shape a pointer is the answer loss arriving through exact
+# arithmetic. Read ``acc`` (answer accuracy); ``canonical_acc`` is conformity to the
+# generator's form and is expected near zero for the answer-only arm, because 48
+# distinct three-instruction programs compute ``(a+b)+(c+d)``.
+REGMACHINE_ARMS = ("regmachine-supervised", "regmachine-answer-only")
+
+# The same two arms with redundant moduli, which turns a silent wrong answer into an
+# admitted refusal. They exist because the depth-2 run measured `mis_answered` at
+# **0.442** on the answer-only arm: 44% of held-out problems answered with a
+# confident wrong number, because CRT has no locality and no arm had the redundancy
+# of 3a-ix switched on. That machinery had been measured standalone (100% of single
+# errors corrected, 0% mis-corrected) and imported by nothing.
+#
+# **What this pair does and does not compare.** Adding three moduli changes the
+# prediction task -- the model must now get 8 residue blocks right instead of 5 --
+# so `answer_acc` is *not* like-for-like against the non-redundant arms, and a drop
+# there is the price of the wider code rather than a regression. What is
+# like-for-like, and the point, is how the error budget inside each arm splits:
+# `answer_acc + refused + mis_answered = 1` over kept rows, and 3a-ix predicts
+# `mis_answered` collapses while `refused` absorbs it.
+REDUNDANT_ARMS = ("regmachine-supervised-redundant",
+                  "regmachine-answer-only-redundant")
+
+# The two regimes between the constant extremes, neither of which had ever been run
+# even though ``RegMachineTrainer``'s own docstring describes the first as the design
+# ("supervise the program first, lean on the answer after").
+#
+# ``anneal``   supervised for 200 steps, gold program withdrawn linearly by step 600,
+#              answer-only for the last 400. Asks whether the answer loss can *hold* a
+#              program it could not *find* -- which separates a cold-start problem from
+#              a bad-gradient one.
+# ``partial42`` a gold program for a hash-selected 42% of problems and nothing for the
+#              rest, which is not a hypothetical: it is exactly what GSM8K's calculator
+#              annotations supply (3c). Membership is per *problem*, not per step,
+#              because a dataset either annotates a problem or never does.
+# Interventions aimed at the *measured* cause of the answer-only failure rather than at
+# the failure itself. 3a-xii found the failing seeds are uncommitted, not wrong --
+# ptr_sharp 1.0 gives 1.000 and anything below gives ~0.04, with nothing between -- so
+# these force commitment and ask whether that is sufficient without a warm start.
+#   commit   an entropy penalty on the op and pointer distributions
+#   gumbel   straight-through discrete sampling, so the executor sees a real program
+#            rather than a blur of several (the mechanism RegisterMachine has carried,
+#            unused, since it was written)
+COMMIT_ARMS = ("regmachine-answer-only-commit", "regmachine-answer-only-gumbel")
+CURRICULUM_ARMS = ("regmachine-anneal", "regmachine-partial42")
+ALL_ARMS = (ARMS + EXTRA_ARMS + REGMACHINE_ARMS + REDUNDANT_ARMS
+            + CURRICULUM_ARMS + COMMIT_ARMS)
+
+# Ring for the register machine's integer path: the same moduli the depth-2 result
+# of 3a-vii was produced with, so that arm stays comparable.
+REGMACHINE_MODULI: Tuple[int, ...] = (16, 25, 27, 11, 37)
+
+# Three redundant moduli on top, which is the sizing 3a-ix measured as the point
+# where single errors are fully corrected rather than partly refused. Chosen to keep
+# the widest modulus at 41 rather than 101 or 271 -- the packed path pads everything
+# to the widest, so a large redundant modulus costs the whole batch. Legitimate
+# values then occupy 2.198e6 of an 8.200e9 ring (0.027%), which is what makes a
+# corrupted residue land outside it, and every digit period stays <= 6.
+REDUNDANT_MODULI: Tuple[int, ...] = (7, 13, 41)
 
 
 # -- one run --------------------------------------------------------------
+# Set in every worker by the pool initializer; ``None`` means CPU-only.
+_GPU_SEM = None
+
+
+def _init_worker(sem) -> None:
+    global _GPU_SEM
+    _GPU_SEM = sem
+
+
 def _run_one(job: Tuple[str, str, int, int, int, int]) -> Dict[str, object]:
     """Train one (arm, seed) and return its held-out accuracy.
 
     Runs in its own process with a single torch thread: the arms are embarrassingly
     parallel across seeds, and one thread each beats N threads contending.
     """
-    arm, task_key, seed, steps, batch_size, d_model = job
+    arm, task_key, seed, steps, batch_size, d_model, allow_gpu = job
+    # **The device is chosen by the worker, not baked into the job.** Assigning it
+    # statically -- round-robin over a device list -- looked fine and load-balanced
+    # terribly: with the card ~3.4x faster, a fixed share of jobs pinned to CPU becomes
+    # the entire wall clock while the GPU sits idle at the end. Measured: 9 GPU jobs
+    # finishing in ~25 min behind 6 CPU jobs taking ~56.
+    #
+    # A semaphore fixes it without needing to know the speed ratio. Whichever worker is
+    # free claims the card if a slot is open and falls back to CPU otherwise, so fast
+    # workers churn through jobs and the split settles wherever the hardware puts it.
+    device = "cpu"
+    claimed = False
+    if allow_gpu and _GPU_SEM is not None and _GPU_SEM.acquire(block=False):
+        device, claimed = "cuda", True
     os.environ.setdefault("OMP_NUM_THREADS", "1")
     import torch
 
@@ -119,14 +212,21 @@ def _run_one(job: Tuple[str, str, int, int, int, int]) -> Dict[str, object]:
     mcfg = ModelConfig(d_model=d_model, n_heads=4, d_ff=2 * d_model,
                        n_prelude=1, n_recurrent=1, n_coda=1, recurrent_steps=4)
     t0 = time.time()
-    out: Dict[str, object] = {"arm": arm, "task": task_key, "seed": seed}
+    out: Dict[str, object] = {"arm": arm, "task": task_key, "seed": seed,
+                              "device": device}
+    # **fp32 on the GPU, deliberately.** ``Amp`` would turn on bf16 autocast, and the
+    # algebra is distributions over small rings: in reduced precision the tail
+    # underflows, the convolutions lose mass, and a renormalised-but-wrong distribution
+    # decodes to a *different integer* -- which in a residue system is not a near miss.
+    # The tensors are tiny, so the precision costs nothing worth having, and the
+    # measured speedup below was obtained without it.
 
     if arm.startswith("coconut"):
         if arm == "coconut-long":
             steps = int(round(steps * COMPUTE_MATCH))
         cfg = CoconutConfig(steps=steps, batch_size=batch_size, seed=seed,
                             depth=spec.depth, digits=spec.digits, ops_key=spec.ops_key,
-                            device="cpu")
+                            device=device)
         tr = CoconutTrainer(cfg, tok, mcfg)
         for s in range(steps):
             tr._train_step(s)
@@ -134,6 +234,48 @@ def _run_one(job: Tuple[str, str, int, int, int, int]) -> Dict[str, object]:
         # setting and costs K+1 forwards, matching the LOTUS loops+1.
         out["acc"] = tr.greedy_accuracy(cfg.n_thoughts, 512)
         out["acc_k0"] = tr.greedy_accuracy(0, 512)
+        out["steps_run"] = steps
+    elif arm.startswith("regmachine"):
+        from lamb.regmachine import RegMachineTrainer
+
+        # ``ops_key=2`` means division, which plain residues cannot express at all,
+        # so that task selects the rational register file rather than being a
+        # separate arm. The instruction set follows the ring, not the flag.
+        rational = spec.ops_key >= 2
+        redundant = REDUNDANT_MODULI if arm.endswith("-redundant") else None
+        cfg = LotusConfig(steps=steps, batch_size=batch_size, seed=seed,
+                          depth=spec.depth, digits=spec.digits, ops_key=spec.ops_key,
+                          n_latent=spec.n_latent, loops=3,
+                          trace_coef=0.0, alu_coef=0.0, alu_consistency_coef=0.0,
+                          alu_moduli=REGMACHINE_MODULI,
+                          use_boundaries=False, switch_coef=0.0, device=device)
+        # 200 supervised steps then a linear withdrawal to zero by 600, scaled if the
+        # step budget differs so the schedule is a fraction of training rather than an
+        # absolute that silently becomes "always supervised" on a longer run.
+        anneal = ((int(0.2 * steps), int(0.6 * steps))
+                  if arm == "regmachine-anneal" else None)
+        frac = 0.42 if arm == "regmachine-partial42" else 1.0
+        ent = 0.02 if arm.endswith("-commit") else 0.0
+        gum = (1.0, True) if arm.endswith("-gumbel") else (0.0, False)
+        tr = RegMachineTrainer(
+            cfg, tok, mcfg, rational=rational, redundant_moduli=redundant,
+            program_anneal=anneal, program_frac=frac, entropy_coef=ent,
+            tau=gum[0], hard=gum[1],
+            # ``in``, not ``endswith``: the redundant arms are named
+            # ``...-answer-only-redundant``, so an ``endswith("answer-only")`` test
+            # silently hands them ``program_coef=1`` and the arm measures the wrong
+            # thing while looking like it ran.
+            program_coef=0.0 if "answer-only" in arm else 1.0,
+            answer_coef=1.0)
+        for s in range(steps):
+            tr.train_step(s)
+        r = tr.evaluate(512)
+        out["acc"] = r["answer_acc"]
+        for k in ("answer_acc_hard", "canonical_acc", "instr_acc", "op_acc",
+                  "ptr_acc", "dropped", "ptr_sharp", "refused", "mis_answered",
+                  "max_den_magnitude", "zero_den"):
+            if k in r:
+                out[k] = r[k]
         out["steps_run"] = steps
     else:
         cfg = LotusConfig(steps=steps, batch_size=batch_size, seed=seed,
@@ -144,7 +286,7 @@ def _run_one(job: Tuple[str, str, int, int, int, int]) -> Dict[str, object]:
                           space_coef=0.3 if arm == "lotus-space" else 0.0,
                           alu_coef=1.0 if arm == "lotus-alu" else 0.0,
                           alu_consistency_coef=0.0,
-                          use_boundaries=False, switch_coef=0.0, device="cpu")
+                          use_boundaries=False, switch_coef=0.0, device=device)
         tr = LotusTrainer(cfg, tok, mcfg)
         for s in range(steps):
             tr._train_step(s)
@@ -168,6 +310,8 @@ def _run_one(job: Tuple[str, str, int, int, int, int]) -> Dict[str, object]:
         # the trace arm is being handicapped and n_latent is too small.
         out["truncated"] = tr.truncated / float(steps * batch_size)
     out["secs"] = time.time() - t0
+    if claimed:
+        _GPU_SEM.release()
     return out
 
 
@@ -265,6 +409,20 @@ def summarise(rows: List[Dict[str, object]]) -> Dict[str, object]:
             "n": len(xs), "mean": statistics.mean(xs), "sem": _sem(xs),
             "min": min(xs), "max": max(xs), "ci95": [lo, hi], "per_seed": xs,
         }
+        # Arm-specific diagnostics, averaged. ``dropped`` is the one that changes how
+        # a number should be read: an accuracy measured on 60% of a held-out set is
+        # not the same number as one measured on all of it, and a reader should not
+        # have to reconstruct which it was.
+        extras = {}
+        for k in ("answer_acc_hard", "dropped", "canonical_acc", "op_acc",
+                  "ptr_acc", "ptr_sharp", "refused", "mis_answered", "zero_den",
+                  "max_den_magnitude", "trace_probe", "truncated"):
+            vs = [float(r[k]) for r in rows
+                  if str(r["arm"]) == arm and r.get(k) is not None]
+            if vs:
+                extras[k] = statistics.mean(vs)
+        if extras:
+            summary["arms"][arm]["extras"] = extras     # type: ignore[index]
 
     for a, b in (("lotus-answer", "coconut"), ("lotus-trace", "lotus-answer"),
                  ("lotus-trace", "coconut"),
@@ -272,7 +430,28 @@ def summarise(rows: List[Dict[str, object]]) -> Dict[str, object]:
                  ("coconut-long", "coconut"), ("lotus-answer", "coconut-long"),
                  ("lotus-trace", "coconut-long"),
                  # the untested second supervision dimension, and the ALU
-                 ("lotus-space", "lotus-trace"), ("lotus-alu", "lotus-trace")):
+                 ("lotus-space", "lotus-trace"), ("lotus-alu", "lotus-trace"),
+                 # the pre-registered question: does outcome-only program induction
+                 # survive past three instructions? The bridge has no gold program
+                 # available at all, so this is the claim it rests on.
+                 ("regmachine-answer-only", "regmachine-supervised"),
+                 # within the redundant ring, the same question
+                 ("regmachine-answer-only-redundant",
+                  "regmachine-supervised-redundant"),
+                 # across rings: this prices the *wider code*, not the model, since
+                 # the redundant arm has three more residue blocks to get right
+                 ("regmachine-answer-only-redundant", "regmachine-answer-only"),
+                 ("regmachine-supervised-redundant", "regmachine-supervised"),
+                 # can the answer loss hold a program it could not find?
+                 ("regmachine-anneal", "regmachine-supervised"),
+                 ("regmachine-anneal", "regmachine-answer-only"),
+                 # is the bridge's 42% coverage enough at 7 instructions?
+                 ("regmachine-partial42", "regmachine-supervised"),
+                 ("regmachine-partial42", "regmachine-answer-only"),
+                 # is forcing commitment enough on its own, with no warm start?
+                 ("regmachine-answer-only-commit", "regmachine-answer-only"),
+                 ("regmachine-answer-only-gumbel", "regmachine-answer-only"),
+                 ("regmachine-answer-only-commit", "regmachine-supervised")):
         shared = sorted(set(by_arm[a]) & set(by_arm[b]))
         if len(shared) < 2:
             continue
@@ -307,6 +486,9 @@ def _fmt(summary: Dict[str, object], spec: TaskSpec, steps: int, batch: int) -> 
             continue
         out.append(f"{arm:>14}  {a['n']:>2}  {a['mean']:6.3f}  {a['sem']:6.3f}  "
                    f"{a['min']:6.3f}  {a['max']:6.3f}  [{a['ci95'][0]:.3f}, {a['ci95'][1]:.3f}]")
+        ex = a.get("extras")
+        if ex:
+            out.append(f"{'':>14}  " + "  ".join(f"{k} {v:.3f}" for k, v in ex.items()))
     out.append("")
     out.append("paired differences (same seed => same init and same eval set)")
     for k, p in summary["pairs"].items():               # type: ignore[union-attr]
@@ -339,6 +521,7 @@ def _fmt(summary: Dict[str, object], spec: TaskSpec, steps: int, batch: int) -> 
 # -- driver ---------------------------------------------------------------
 def run_study(task_key: str, seeds: int = 5, steps: int = 1000, batch_size: int = 64,
               d_model: int = 96, workers: int = 4, arms: Sequence[str] = ARMS,
+              gpu_workers: int = 0,
               out_path: Optional[str] = None, seed_offset: int = 0,
               merge: Optional[str] = None) -> Dict[str, object]:
     """Run ``arms`` at ``seeds`` seeds and summarise.
@@ -349,28 +532,85 @@ def run_study(task_key: str, seeds: int = 5, steps: int = 1000, batch_size: int 
     needed is not known until the first few runs reveal the spread.
     """
     spec = TASKS[task_key]
-    # One CUDA context per worker process, ~300-500 MB each before a single
-    # parameter is allocated. Four workers is the right answer on four CPU cores
-    # and a guaranteed out-of-memory on a 4 GB card, so the parallelism that helps
-    # on CPU is exactly what breaks on a small GPU. Clamp rather than fail: the
-    # runs are the point, the concurrency is not.
-    from .device import resolve_device
-
-    if workers > 1 and resolve_device("auto").startswith("cuda"):
-        print(f"[study] CUDA detected: forcing workers {workers} -> 1 "
-              f"(one CUDA context per worker would exhaust a small card)", flush=True)
-        workers = 1
+    # There used to be a clamp here: if ``resolve_device("auto")`` reported CUDA,
+    # workers dropped to 1, because one CUDA context per worker is ~300-500 MB before
+    # a single parameter is allocated and four of them exhaust a small card.
+    #
+    # It was guarding a situation that could not arise *then*: every arm pinned
+    # ``device="cpu"``, so merely *having* a card never put a context in a worker.
+    # Arms are device-aware again (see ``gpu_workers`` below), and the VRAM budget
+    # that replaces this clamp is sized from measurement. What the clamp did
+    # instead was call ``torch.cuda.is_available()``, which initialises CUDA in the
+    # parent and poisoned the fork (see the spawn comment below). So it cost a 4x
+    # slowdown on any GPU box and caused the failure it was written to prevent.
+    #
+    # Restore it if an arm ever becomes device-aware. Until then the honest statement
+    # is that the card is irrelevant to this file.
     if merge and not os.path.exists(merge):
         # Validate before spending the compute, not after. Discovering a bad path
         # in the summary step throws away every run that preceded it.
         raise FileNotFoundError(f"--merge file does not exist: {merge}")
-    jobs = [(arm, task_key, seed, steps, batch_size, d_model)
+    # **Hybrid GPU + CPU.** Measured on this box at depth 3: 0.50 s/step on the card
+    # against ~1.7 s/step on eight CPU threads at batch 64, and the gap widens with
+    # batch (0.73 s/step at batch 256, where CPU is ~9.6). The repo's note that "at
+    # 283k parameters every kernel is too small to fill a GPU" does not hold for the
+    # register-machine path: the packed algebra moves ``batch x slots x K x P`` tensors,
+    # which dwarf the transformer at this width.
+    #
+    # Jobs are independent, so the card and the cores run different seeds at the same
+    # time and throughput is the sum rather than the max. GPU workers are capped by
+    # VRAM, not by preference: each carries its own CUDA context (~300 MB) on top of its
+    # activations (~490 MB at batch 64, ~2.5 GB at batch 256), and a 4 GB card holds
+    # very few of the latter. Overcommitting does not degrade gracefully, it OOMs
+    # mid-study -- which is the failure the clamp removed earlier in this file was
+    # guarding against, now that an arm is finally device-aware again.
+    gpu_slots = 0
+    if gpu_workers > 0:
+        import torch as _t
+
+        if not _t.cuda.is_available():
+            print("[study] --gpu-workers requested but no CUDA device; using CPU only",
+                  flush=True)
+        else:
+            free = _t.cuda.get_device_properties(0).total_memory
+            # Measured from ``nvidia-smi``, not from ``max_memory_allocated``: that
+            # reported 487 MB at batch 64 while the true per-worker footprint is
+            # ~1.27 GB, because it counts neither the CUDA context (~0.4 GB) nor the
+            # caching allocator's reserved-but-unallocated pool. Sizing from the
+            # optimistic number put three workers on a 4 GB card and OOMed mid-study.
+            per = 0.5e9 + 12.0e6 * batch_size
+            fits = max(1, int(0.85 * free / per))
+            if gpu_workers > fits:
+                print(f"[study] {gpu_workers} GPU workers do not fit in "
+                      f"{free/1e9:.1f} GB at batch {batch_size}; using {fits}", flush=True)
+                gpu_workers = fits
+            gpu_slots = gpu_workers
+    jobs = [(arm, task_key, seed, steps, batch_size, d_model, gpu_slots > 0)
             for arm in arms for seed in range(seed_offset, seed_offset + seeds)]
+    print(f"[study] up to {gpu_slots} concurrent runs on cuda, "
+          f"{workers} workers total (claimed dynamically)", flush=True)
     print(f"[study] {len(jobs)} runs = {len(arms)} arms x {seeds} seeds, "
           f"{steps} steps @ batch {batch_size}, {workers} workers", flush=True)
     rows: List[Dict[str, object]] = []
     t0 = time.time()
-    with ProcessPoolExecutor(max_workers=workers) as ex:
+    # **Spawn, not fork.** The clamp above calls ``resolve_device("auto")``, which
+    # calls ``torch.cuda.is_available()``, which *initializes CUDA in the parent* --
+    # and a forked child that then touches any accelerator API dies with "Cannot
+    # re-initialize CUDA in forked subprocess". Under torch 2.14 `Adam.step` calls
+    # `torch.accelerator.current_stream()` in a health check, so *every* worker dies
+    # on the first optimiser step -- and at the time every arm was `device="cpu"`,
+    # so not one of them even wanted the card.
+    #
+    # The clamp did not save it and could not: the failure is the fork, not the
+    # context count. This went unseen because CI is CPU-only and the GPU work was
+    # done from notebooks, so this file -- the tool the project's measurement
+    # discipline rests on -- had never once been run on a machine with a card in it.
+    # Spawn costs a fresh interpreter per worker, which against a 1000-step run is
+    # nothing.
+    ctx = multiprocessing.get_context("spawn")
+    sem = ctx.Semaphore(gpu_slots) if gpu_slots else None
+    with ProcessPoolExecutor(max_workers=workers, mp_context=ctx,
+                             initializer=_init_worker, initargs=(sem,)) as ex:
         for r in ex.map(_run_one, jobs):
             rows.append(r)
             extra = ""
@@ -408,6 +648,9 @@ def main(argv: Optional[List[str]] = None) -> None:
     p.add_argument("--batch-size", type=int, default=64)
     p.add_argument("--d-model", type=int, default=96)
     p.add_argument("--workers", type=int, default=4)
+    p.add_argument("--gpu-workers", type=int, default=0,
+                   help="how many of the workers run on the GPU; the rest run on CPU "
+                        "concurrently, so throughput is the sum. Capped by VRAM.")
     p.add_argument("--arms", nargs="+", default=list(ARMS), choices=list(ALL_ARMS),
                    help="default: the four established arms; lotus-space is opt-in")
     p.add_argument("--out", type=str, default=None, help="write the full result as JSON")
@@ -417,7 +660,7 @@ def main(argv: Optional[List[str]] = None) -> None:
                    help="an earlier study's JSON whose runs to fold into the summary")
     a = p.parse_args(argv)
     run_study(a.task, a.seeds, a.steps, a.batch_size, a.d_model, a.workers, a.arms,
-              a.out, a.seed_offset, a.merge)
+              a.gpu_workers, a.out, a.seed_offset, a.merge)
 
 
 if __name__ == "__main__":

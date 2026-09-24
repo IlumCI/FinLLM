@@ -72,3 +72,36 @@ def test_topk_fallback_matches():
         s.add([0.0, 1.0], 2)
         top = s.query([0.8, 0.2], 1)
         assert top[0][0] == 1
+
+
+def test_division_dispatches_the_same_way_for_evaluate_and_verify():
+    """The guard was on ``evaluate`` and not on ``verify``, and they disagreed.
+
+    The Rust lexer has no ``/`` token, so on a machine with the extension built
+    ``verify("48/2", "24")`` reached it and returned **False** -- every division
+    problem in self-play scored wrong, silently corrupting the only reward signal the
+    loop has. CI runs the Python backend, so the asymmetry was invisible; the commit
+    that added division guarded the function it was looking at and not the one that
+    produces the reward.
+
+    This test passes trivially on the Python backend and is the one that would have
+    caught it on a Rust build, which is the whole point of writing it against the
+    *dispatch* rather than against either implementation.
+    """
+    from lamb._native import evaluate, verify
+
+    for expr, want in (("48/2", 24), ("81/9", 9), ("(6+6)/(2+1)", 4), ("(48/2)+3", 27)):
+        assert evaluate(expr) == want, f"{expr} evaluated wrongly"
+        assert verify(expr, str(want)) is True, f"{expr} failed to verify its own value"
+        assert verify(expr, str(want + 1)) is False
+
+
+def test_inexact_division_is_none_rather_than_a_rounded_answer():
+    """``7/2`` has no integer value, and a ring cannot hold a rounded one. The
+    generator constructs exact quotients precisely so this never has to be decided
+    downstream."""
+    from lamb._native import evaluate, verify
+
+    assert evaluate("7/2") is None
+    assert verify("7/2", "3") is False
+    assert verify("7/2", "4") is False
