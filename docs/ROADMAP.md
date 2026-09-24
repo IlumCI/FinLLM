@@ -930,6 +930,38 @@ anneal schedule (20%/60%) and the 42% ratio are single points, not swept, so a n
 result at these settings does not establish that no schedule works -- only that the
 obvious one does not. That distinction is the one 3a-ii failed to make about RL.
 
+### 3a-xviii. Program induction on varied structure: both verdicts hold
+
+3a-xv showed every prior induction measurement was taken on a task with exactly one
+pointer pattern, so it measured constant recall. `d3g1s` (unbalanced trees, `shape=1`)
+removes that: operand counts vary 5/7/9, instruction counts 3/5/7, 4 distinct pointer
+patterns at depth 3 and 25 at depth 4. 5 seeds, 1000 steps.
+
+| arm | mean | sd | `canonical_acc` | `ptr_acc` |
+| --- | --- | --- | --- | --- |
+| `regmachine-supervised` | **1.000** | 0.000 | **0.761** | 0.898 |
+| `regmachine-answer-only` | 0.075 | 0.055 | 0.000 | 0.025 |
+
+Paired difference -0.925, seed ranges disjoint, permutation *p* = 0.0079.
+
+Two things this settles.
+
+**Supervised program emission was not constant recall.** It reaches 1.000 on every seed
+with varying operand counts and varying structure, and `canonical_acc` is 0.761 rather
+than the 1.000 of the balanced task: the model reaches the right answer on problems whose
+program it does not reproduce exactly. That is the first capability result in this repo
+measured where the program actually varies.
+
+**Outcome-only induction still fails, so 3a-xii was not an artifact of the degeneracy.**
+0.075 soft, 0.034 when the argmax program is executed, against 1.000. It is higher than
+the 0.015 on balanced trees, which is the wrong direction for a "the task was too easy"
+explanation and consistent with the soft mixture flattering an uncommitted model.
+
+What remains untested is the refusal signal, which needs a competent-and-fallible regime.
+The varied task has one: supervised passes through intermediate accuracy over more steps
+than the balanced task's five-step knife-edge, so `self_consistency` can finally be
+measured somewhere it means something.
+
 ### 3a-xvii. Self-knowledge without readability: agreement under resampling
 
 A design that never decodes its latents has spent its interpretability, so the only
