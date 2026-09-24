@@ -957,6 +957,21 @@ class RegMachineTrainer:
                "program_loss": float(b["prog"]), "answer_loss": float(b["ans"]),
                "ptr_sharp": float(sharp),
                "dropped": 1.0 - sum(keep) / max(1, len(keep))}
+        # The refusal signal, reported by every arm from now on rather than measured in
+        # a one-off script. It needs a competent-and-fallible regime to mean anything,
+        # and which arms provide one is not knowable in advance, so it is cheaper to
+        # always have it than to discover later that the interesting run did not.
+        # Reported, and a failure is reported too. A bare ``except: pass`` here would be
+        # the same mistake as the ``nan_to_num`` in the entropy term: instrumentation
+        # that hides its own breakage leaves the absence of a number looking like the
+        # absence of a problem.
+        try:
+            sc = self.self_consistency(n_tasks=min(128, n_tasks), n_samples=4, tau=1.0)
+            out["agree_cover"] = sc["coverage"]
+            out["agree_sep"] = sc["separation"]
+            out["agree_valid"] = sc["valid"]
+        except Exception as exc:           # noqa: BLE001 - recorded, not swallowed
+            out["agree_error"] = f"{type(exc).__name__}: {exc}"
         if self.rational:
             # The sufficient-side ring monitor: denominators multiply and never
             # reduce, so on a *sharp* program this only grows, and it is how a long

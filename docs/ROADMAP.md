@@ -1820,6 +1820,40 @@ Known limits, recorded rather than left implicit:
   spot is `0 ÷ 0`; a zero divisor with a live numerator is detected by the residual
   itself. See 3a-xi, including where I had that wrong.
 
+## 3d. infContext meets the register machine: the pillar nothing tests
+
+The memory pillar and the reasoning pillar do not touch. `memory_bench` and
+`ruler_bench` measure *retrieval* (needle, passkey, variable tracking) and neither
+computes anything over what was retrieved; `regmachine` loads its operands exactly from
+the prompt. So the claim that would matter for a latent frontier model, **reason over
+what you remembered with O(1) state**, has no test anywhere in this repo.
+
+The blocker is concrete and it is representational, not algorithmic. The register file is
+loaded by a fixed digit->residue map because ROADMAP 3a-vi measured that asking a network
+to induce that map leaves it at chance. That is exactly why operands have to be *in the
+prompt*. An operand arriving from distant context has to get into a register some other
+way, and there are two honest designs:
+
+1. **Register file as bounded cache.** Every value seen enters a register; the query
+   selects among them with pointers, so retrieval becomes pointer selection over a wide
+   file. Clean, reuses the machine wholesale, and bounded: a file of R registers gives
+   R-value context, so it is not infContext, it is a longer window.
+2. **Neural memory gates the file.** The O(1) memory state decides which values are worth
+   a register. This is the design that actually earns the name, and it is the harder one:
+   the memory must emit something the fixed encoder can turn into a residue code, and a
+   learned path from memory to residues is the thing 3a-vi found unlearnable.
+
+Design 2 is the interesting one and it inherits 3a-vi's wall. The way through is probably
+that the memory stores *the digits it saw* rather than a value embedding, so the fixed map
+still does the encoding and nothing has to learn arithmetic. That has not been tried.
+
+Also missing, and cheaper: a task representation. The tokenizer has 22 symbols and none of
+them name a key, so a `(key, value)` context cannot currently be expressed at all. Any
+version of this starts there.
+
+Recorded rather than built, because a half-built version would be a benchmark that
+measures the harness.
+
 ## 4. Deeper test-time memory (ATLAS)
 
 Upgrade the linear delta-rule memory to a small non-linear MLP memory with a
