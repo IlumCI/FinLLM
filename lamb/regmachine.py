@@ -457,7 +457,7 @@ class RegMachineTrainer:
                  redundant_moduli: Optional[Sequence[int]] = None,
                  program_anneal: Optional[Tuple[int, int]] = None,
                  program_frac: float = 1.0, n_instr: Optional[int] = None,
-                 entropy_coef: float = 0.0):
+                 entropy_coef: float = 0.0, entropy_target: float = 0.1):
         from .lotus import LotusTrainer
 
         self.inner = LotusTrainer(cfg, tokenizer, model_cfg)
@@ -531,6 +531,7 @@ class RegMachineTrainer:
         # pressure to commit *early*, and an early commitment to the wrong program is
         # worse than an undecided one that the answer loss could still have moved.
         self.entropy_coef = float(entropy_coef)
+        self.entropy_target = float(entropy_target)
         self.program_anneal = tuple(program_anneal) if program_anneal else None
         # Partial supervision, which is the language bridge's actual condition rather
         # than a hypothetical: GSM8K's calculator annotations recover a program for 42%
@@ -662,11 +663,30 @@ class RegMachineTrainer:
               else self._answer_loss_integer)
         ans, extra = fn(regs, out_reg, answers, k)
         if self.entropy_coef:
+            # **Floored, because an unfloored version diverges.** Minimising entropy has
+            # no lower bound in logit space: driving p toward one-hot drives the logits
+            # toward +-inf and they never stop. Measured -- the first version of this
+            # term sent *every* logit to inf within 40 steps, after which softmax
+            # returns nan and ``ptr_sharp`` reports nan, which is how the arm announced
+            # it rather than by failing.
+            #
+            # Penalising only the excess over a small target removes the gradient once a
+            # distribution is committed enough, so the logits stop growing. It also
+            # makes the coefficient mean something: without a floor the term's scale is
+            # set by how far the logits have already run.
             ent = torch.zeros((), device=self.device)
             for x in logits:                       # op, ptr-a, ptr-b
-                lp = torch.log_softmax(x, dim=-1)
-                # masked slots are -inf -> p=0, and 0*log0 is nan, so clamp the product
-                ent = ent - (lp.exp() * lp).nan_to_num(0.0).sum(-1).mean()
+                # **Clamp, do not nan_to_num.** A masked slot has ``lp = -inf``, so
+                # ``p * lp`` is ``0 * -inf = nan``. ``nan_to_num`` repairs the *forward*
+                # value and does nothing to the backward, so a nan gradient reached the
+                # optimiser and destroyed every weight at step 0 -- while the printed
+                # loss stayed finite and the entropy term reported 0.0000, because
+                # ``nan_to_num`` was also swallowing the evidence. Clamping keeps both
+                # passes finite; the masked terms then contribute ~1e-13 * -30, which is
+                # nothing.
+                lp = torch.log_softmax(x, dim=-1).clamp_min(-30.0)
+                h = -(lp.exp() * lp).sum(-1)
+                ent = ent + torch.relu(h - self.entropy_target).mean()
             ans = ans + self.entropy_coef * ent / 3.0
             extra["ptr_entropy"] = float(ent.detach() / 3.0)
         return {"prog": prog, "ans": ans, "extra": extra, "regs": regs,
@@ -685,6 +705,18 @@ class RegMachineTrainer:
         loss = pc * prog + self.answer_coef * ans
         self.opt.zero_grad(set_to_none=True)
         loss.backward()
+        # Fail loudly rather than train on wreckage. A nan gradient turns every weight
+        # nan on the next step, after which the forward still runs, the loss still
+        # prints a number, and ``evaluate`` still returns an accuracy -- decoded from a
+        # destroyed model. One arm of the commitment study reported a statistically
+        # significant +0.013 that way. A silent void result is worse than a crash.
+        if not torch.isfinite(loss):
+            raise FloatingPointError(f"non-finite loss at step {step}: {float(loss)}")
+        for nm, prm in (("reasoner", self.inner.reasoner), ("machine", self.machine)):
+            for q in prm.parameters():
+                if q.grad is not None and not torch.isfinite(q.grad).all():
+                    raise FloatingPointError(
+                        f"non-finite gradient in {nm} at step {step}")
         torch.nn.utils.clip_grad_norm_(
             list(self.inner.reasoner.parameters()) + list(self.machine.parameters()),
             self.cfg.grad_clip)

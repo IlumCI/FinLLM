@@ -930,6 +930,65 @@ anneal schedule (20%/60%) and the 42% ratio are single points, not swept, so a n
 result at these settings does not establish that no schedule works -- only that the
 obvious one does not. That distinction is the one 3a-ii failed to make about RL.
 
+### 3a-xvi. Forcing commitment: the pre-registered fork resolves against the hypothesis
+
+3a-xii found the answer-only failure is *indecision*, not error -- every seed at
+`ptr_sharp` 1.0 scored 1.000, every seed below it ~0.04, nothing between. 3a-xiv
+pre-registered the fork: if commitment is the **cause**, forcing it should fix accuracy;
+if pointers go sharp while accuracy stays near zero, commitment is a **symptom** and the
+outcome gradient genuinely points the wrong way.
+
+Depth 3, 5 seeds, `program_coef=0` throughout, GPU+CPU hybrid:
+
+| arm | mean | sd | `ptr_sharp` | verdict |
+| --- | --- | --- | --- | --- |
+| `answer-only` (control) | 0.011 | 0.009 | 0.862 | — |
+| `answer-only-gumbel` | 0.023 | 0.010 | **0.996** | commitment supplied |
+| `answer-only-commit` | ~~0.024~~ | — | **nan** | **void, see below** |
+
+**Straight-through Gumbel made the pointers sharp -- 0.996 against the control's 0.862 --
+and accuracy did not move: 0.023 against 0.011, permutation *p* = 0.087, CI crossing
+zero.** The fork resolves to *symptom*. Commitment is not the missing ingredient, and
+the outcome gradient does not locate a correct program at seven instructions even when
+it is handed a decision.
+
+That reinterprets 3a-xv's positive result. The warm start does not work by supplying
+*commitment*; it works by supplying the **right program**. Which means the exact
+generator has to stay in the loop permanently -- outcome-only learning will not bootstrap
+structure, at any sharpness.
+
+#### The entropy arm is void, and how it announced itself
+
+`answer-only-commit` reported **+0.013 at permutation *p* = 0.0317, CI excluding zero**,
+and that number is **withdrawn**: its weights were `nan` from **step 0**, so the accuracy
+was decoded from a destroyed model.
+
+The mechanism is worth writing down because every layer of it looked fine:
+
+- A masked pointer slot has `lp = -inf`, so `p * lp` computes `0 * -inf` = `nan`.
+- `nan_to_num(0.0)` repaired the **forward** value and does nothing to the **backward**,
+  so a `nan` gradient reached `clip_grad_norm_`, which turned the whole gradient `nan`,
+  which turned every weight `nan` on the first optimiser step.
+- The printed loss stayed **finite** (3.22) because the forward was clean.
+- The entropy term then reported **0.0000** -- because `nan_to_num` was also swallowing
+  the evidence that anything was wrong.
+- `evaluate` still returned an accuracy, and the permutation test still called it
+  significant.
+
+So a destroyed model produced a statistically significant result, and the only symptom
+anywhere in the output was `ptr_sharp` reading `nan` -- a metric that exists because
+3a-xii needed it, added for an unrelated reason a few hours earlier.
+
+Two fixes. The entropy is computed on `log_softmax(...).clamp_min(-30)` rather than
+`nan_to_num`, so both passes stay finite and the masked terms contribute ~1e-13 x -30.
+And `train_step` now **raises** on a non-finite loss or gradient, because a trainer that
+silently continues on wreckage keeps printing numbers and the numbers pass significance
+tests. A crash is cheaper than a void result that looks like a finding.
+
+The arm is re-run with the fix; the entropy penalty is also floored at a target entropy,
+since minimising entropy is unbounded below in logit space and would otherwise drive the
+logits apart forever.
+
 ### 3a-xv. The curriculum arms: both criteria pass, and the task is easier than it looked
 
 Depth 3, 5 seeds, everything else as 3a-xii:
