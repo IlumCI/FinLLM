@@ -1014,11 +1014,31 @@ self-knowledge without readability. Unlike the verifier it needs no ground truth
 unlike redundant residues (3a-xiii) it catches a *wrong* answer rather than only an
 ill-formed one.
 
-Limits, stated: the precision claim rests on one informative seed plus seven independent
-checkpoints, because the other two seeds trained to 1.000 and had no errors to catch. It
-is measured on a supervised model; the answer-only arm never reaches a regime where
-refusal would help. And coverage is the cost, not the precision: at 0.871 accuracy it
-declines 30% of problems it would have answered correctly.
+**The adversarial case, which is where it matters.** The answer-only arm answers 92.5% of
+its errors with a confident wrong number, and redundant residues recover 1.3% of those
+(3a-xiii). Three seeds at 600 steps, against three supervised seeds for contrast:
+
+| arm | accuracy | coverage at t=0.9 | accepted |
+| --- | --- | --- | --- |
+| answer-only, seed 0 | 0.027 | **0.00** | nothing |
+| answer-only, seed 1 | 0.023 | **0.00** | nothing |
+| answer-only, seed 2 | 0.098 | 0.07 | **19/19** |
+| supervised, 3 seeds | 1.000 | 0.71-0.77 | **570/570** |
+
+**The signal discriminates models, not only problems.** It declines an untrustworthy
+model almost wholesale and accepts three quarters of a competent one. Two of the three
+answer-only seeds accept *nothing at all* -- which is the correct answer for a model at
+0.02 accuracy, and the behaviour redundancy could not produce.
+
+Tallying every measurement so far at threshold >= 0.7: **zero wrong answers accepted**,
+across 7 training checkpoints, 3 answer-only seeds and 6 supervised seeds. The only
+observed leak is at threshold 0.5, where six errors passed on an 0.871-accuracy model.
+
+Limits, stated. Precision rests on the checkpoint sweep and the answer-only arm, because
+every supervised seed trained to 1.000 and had no errors left to catch; getting supervised
+false-accept evidence needs a task that plateaus below perfect. Coverage is the price
+rather than the precision: at 0.871 accuracy it declines 30% of problems it would have
+answered correctly, and at 0.027 it declines the 2.7% it would have got right too.
 
 ### 3a-xvii. Self-knowledge without readability: agreement under resampling
 
