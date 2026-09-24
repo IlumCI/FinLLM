@@ -552,7 +552,10 @@ every magnitude in range; and, given correct leaf codes, an exact answer at **de
   become registers and the selectors become instructions: a differentiable register
   machine over the algebra. The gold program is free from the same generator, so it
   can be supervised before being relaxed — which is how to avoid the instability that
-  sank earlier neural program induction.
+  sank earlier neural program induction. (The *tree* is indeed absent from prose, but
+  GSM8K's calculator annotations supply the evaluation *chain*, which is what the
+  register machine actually needs — see 3c. The gap was narrower than this bullet
+  assumed.)
 - *The consistency check is not usable yet.* Measured at 400 steps, leaf-residue
   accuracy is **0.985** while the root slot sits at **0.229**, barely above chance:
   the model specialises on leaves exactly as intended, because composition is no
@@ -658,8 +661,17 @@ computing the right function rather than memorising a mapping.
 
 **Gradients through exact arithmetic are sufficient to induce a correct program from
 outcomes alone.** That is the one thing in this design that a non-differentiable
-executor cannot do, and it is the mechanism the language bridge depends on — a word
-problem does not come with a gold program either.
+executor cannot do.
+
+**Corrected in place:** this paragraph used to end *"and it is the mechanism the
+language bridge depends on — a word problem does not come with a gold program
+either."* The first clause stands; the second is **false for GSM8K**, whose train
+solutions carry inline calculator annotations (`<<48/2=24>>`) that recover to a
+program directly (3c). So the bridge does not have to rest on this result — it gets to
+*test* it, with the supervised arm as a control. Which is better news for the bridge
+and worse news for this section, because it removes the argument that an `n=1` result
+had to be relied on rather than measured. The depth-3 criterion is pre-registered in
+3a-xii.
 
 Caveats, since the arms are n=1 at the smallest depth: three instructions over four
 operands is a small program space, `op_acc` at 0.603 says the answer-only arm's
@@ -764,10 +776,503 @@ Two things contain it, one of which was already built:
 Training is unaffected either way, since the losses read distributions rather than
 the argmax.
 
-**Still open:** the grammar generates `+`, `−` and `*`, so there is no division
-*training* data yet — the machine can execute `/` but has not been asked to learn
-when to emit it. And a zero divisor remains undetectable in the ring (3a-viii), so
-guarding it belongs to the emitted program.
+**Corrected in place.** This paragraph used to read *"the grammar generates `+`,
+`−` and `*`, so there is no division training data yet"*. That was true when it was
+written and stopped being true one commit later: `ops_key=2` generates `+ − * /`
+with divisions made exact by construction. The accurate statement is that the data
+exists and **the consumer did not** — see 3a-xi, which is the more interesting
+failure.
+
+**Still open:** a zero divisor remains undetectable in the ring (3a-viii), so
+guarding it belongs to the emitted program — and 3a-xi turns that from a note into
+a cost, because the natural answer-side loss for rationals has a degenerate zero at
+exactly that point.
+
+### 3a-xi. Four seams, and an invariant broken where nobody was looking
+
+Wiring the division work of 3a-x to the trainer of 3a-vii turned up four gaps
+between components that were each correct on their own. Recorded because the shape
+repeats: every one of them sat in the *join*, and the tests all passed because each
+test constructed its own inputs rather than taking the previous stage's output.
+
+**1. Out-of-range values were not masked in the register-machine trainer.** The
+project's own invariant is that a wrapped value is a *different* number, not a large
+one, so an out-of-ring value is masked and never clipped; `lamb/lotus.py` has done
+that since the ALU landed. `RegMachineTrainer._losses` did not, and
+`ResidueSystem.targets` is an unguarded `int(v) % p`, so an out-of-ring answer became
+a perfectly legal cross-entropy target *for the wrong number*. It never bit because
+the only configuration ever run — depth 2, one digit, `(+,−)` — cannot leave the ring.
+Depth 3 and multiplication leave it immediately, which is to say the bug was waiting
+precisely in the direction the next measurement goes. The drop rate is now reported
+by `train_step` and `evaluate` rather than applied silently: an accuracy measured on
+60% of a held-out set is not the same number as one measured on all of it.
+
+**2. The grammar's division output was unparseable.** `alu.parse_expr` scanned
+`"+-*"`, so the leaf `48/2` raised; and `gold_program` defaulted to the integer
+`OPS`, so a `/` node raised from `ops.index`. Both sit inside
+`RegMachineTrainer._prepare`. So `ops_key=2` — data that generates perfectly — crashed
+the only program trainer in the repo, while the ROADMAP recorded the *opposite*
+problem. Every rational test hand-fed `Fraction` values through hand-built pointers,
+and a test that constructs its own inputs cannot fail on a parser.
+
+**3. `execute` read the module-level `OPS` rather than the machine's.** Harmless
+while every machine had three operations; silently wrong the moment the operation
+head is four wide, since the fourth logit would be trainable, selectable, and never
+composed.
+
+**4. The bridge threw the scale away one line after parsing it.**
+`registers_from_quantities` returned `[q.value for q in qs]`, so `3.25` entered the
+register file as `325` and `7` as `7`. That is the mixed-scale failure 3a-viii was
+written to kill, reintroduced at the one seam where nothing downstream can catch it,
+with the correct join (`RationalAlgebra.encode_scaled`) sitting unused two modules
+away. It now returns `(values, scales, counts)`.
+
+**5. `lamb/study.py` was broken on any machine with a GPU, and had never been run on
+one.** The first attempt to run the arms above died instantly: every worker raised
+*"Cannot re-initialize CUDA in forked subprocess"* on its first optimiser step. The
+chain is worth spelling out because each link looked harmless.
+
+The file opened with a clamp — if `resolve_device("auto")` reported CUDA, drop to one
+worker, since one CUDA context per worker is ~300–500 MB and four exhaust a small
+card. That clamp calls `torch.cuda.is_available()`, which **initialises CUDA in the
+parent**, and `ProcessPoolExecutor` then *forks*. Under the pinned torch 2.14,
+`Adam.step` runs a health check through `torch.accelerator.current_stream()`, so every
+child dies — even though every arm in `_run_one` pins `device="cpu"` and no worker
+ever wanted a card.
+
+So the clamp caused the failure it was written to prevent, and clamping to one worker
+did not help, because the problem was the fork and not the context count. Fixed by
+using a **spawn** context; the clamp is removed outright, because the arms are
+CPU-pinned by construction and the guard was protecting against a situation that
+cannot arise. On this box it also cost a 4× slowdown for nothing.
+
+It went unseen because CI is CPU-only and the GPU work was done from notebooks — so
+**the tool this project's measurement discipline rests on had never once executed on
+the hardware its own scale-up section points at.** That is a worse gap than any of
+the four above: a broken trainer produces a wrong number, and a broken harness
+produces none, but it also means none of the discipline was available on the hardware
+where the interesting runs happen.
+
+**A design cost that came out of the fix, stated rather than buried.** The integer
+answer loss is cross-entropy of the executed result against the answer's residues.
+That does not transfer to rationals: a fraction cannot be reduced in residue form, so
+the pair a program builds for `109/4` is some unreduced `(N, D)`, and supervising `N`
+against `109` supervises the wrong number. The criterion that *is* correct is the
+cross-product residual `N·q − D·p = 0` — one target, zero, in every modulus, built
+from the `+ − *` the ring already has.
+
+It has a degenerate zero, and **the first version of this paragraph got its shape
+wrong** — in the direction that overstates the problem. I wrote that a program reaches
+`(N, D) = (0, 0)` by dividing through a register holding `0`. The test written to
+demonstrate that falsified it: `5 / 0` gives `(5, 0)`, whose residual is
+`5·1 − 0·7 = 5`, so the criterion *rejects* it at full cost. A zero divisor is
+detected, not hidden.
+
+Since `a/b ÷ c/d → (ad, bc)`, reaching `(0, 0)` needs a zero **numerator** as well as
+a zero divisor — `0 ÷ 0`. Still reachable: one-digit operands include `0`, and a
+pointer pair may address the same register twice. So `den_zero_coef` is load-bearing
+for that one case rather than a general necessity, and the residual does more of the
+work than the first draft credited it with. 3a-viii's *"division by zero is
+undetectable in the ring"* met from the loss side — where the ring turns out to be
+better at it than expected.
+
+### 3a-xiv. Pre-registered: can the answer loss *hold* a program it cannot *find*?
+
+3a-xii establishes that outcome-only induction fails at 7 instructions (0.015 against a
+supervised 1.000) while the supervised arm is perfect at both depths. Both arms are
+constant extremes, and `RegMachineTrainer`'s own docstring has described the intended
+curriculum since it was written -- *"supervise the program first, lean on the answer
+after"* -- which **no arm had ever run**. The gap between those extremes is where the
+answer lies, and it is also where the language bridge actually sits.
+
+Two arms, both at **depth 3**, since that is where outcome-only failed:
+
+`regmachine-anneal` -- supervised for the first 20% of steps, gold program withdrawn
+linearly to zero by 60%, answer-only for the last 40%.
+
+> **Criterion.** Precondition: the arm reaches ~1.000 during the supervised phase (the
+> supervised arm is 1.000 on 5/5, so a failure here means the schedule broke something
+> and the test did not run). Then:
+> - **`answer_acc` >= 0.9 after withdrawal** => the answer loss can *hold* a committed
+>   program it could not *find*. The depth-3 failure is then a cold-start / exploration
+>   problem, not a gradient-quality one -- and that is an actionable difference, because
+>   cold starts have known fixes and bad gradients do not.
+> - **collapse toward 0.015** => the outcome gradient cannot even maintain a correct
+>   program at 7 instructions. That is a *stronger* negative than 3a-xii: it would mean
+>   the answer loss is actively destructive at this width rather than merely
+>   insufficient, and the differentiable executor's practical value would be confined
+>   to very short programs.
+
+`regmachine-partial42` -- a gold program for a hash-selected **42%** of problems and
+nothing for the other 58%. Membership is decided per *problem* rather than sampled per
+step, because that is how a dataset behaves -- per-step dropout would hand every problem
+supervision eventually and measure something else.
+
+> **Criterion.** **`answer_acc` >= 0.9** => 42% supervision suffices at 7 instructions.
+> Below that, partial supervision does not carry the unsupervised remainder at this
+> width, and the bridge needs either more coverage or a different mechanism for it.
+
+**Corrected before the arm reported, not after.** The 42% was chosen because it was
+GSM8K's measured program coverage when this was pre-registered. It is no longer: 3c's
+compound decomposition and unit constants moved coverage to **0.680 train / 0.691 test**.
+So the arm no longer *mirrors* the bridge -- it is a **lower bound** on it, which is the
+more useful direction to be wrong in. If 42% suffices then 68% does with margin; if 42%
+fails, a 68% arm is the follow-up rather than the conclusion.
+
+The criterion itself is untouched, and the arm was already running when the mismatch was
+noticed. Rewriting a threshold after seeing an outcome is the failure this project logs
+at 3a-i and 3a-vi; rewriting a *rationale* before any number exists is just bookkeeping,
+and the distinction is only meaningful if the correction is timestamped by the run it
+precedes.
+
+Both criteria are fixed before running. Note what is deliberately *not* claimed: the
+anneal schedule (20%/60%) and the 42% ratio are single points, not swept, so a negative
+result at these settings does not establish that no schedule works -- only that the
+obvious one does not. That distinction is the one 3a-ii failed to make about RL.
+
+### 3a-xv. The curriculum arms: both criteria pass, and the task is easier than it looked
+
+Depth 3, 5 seeds, everything else as 3a-xii:
+
+| arm | mean | sd | `canonical_acc` | `mis_answered` |
+| --- | --- | --- | --- | --- |
+| `regmachine-supervised` | 1.000 | 0.000 | 1.000 | 0.000 |
+| **`regmachine-anneal`** | **1.000** | 0.000 | 1.000 | 0.000 |
+| **`regmachine-partial42`** | **1.000** | 0.000 | 1.000 | 0.000 |
+| `regmachine-answer-only` | 0.015 | 0.013 | 0.000 | 0.985 |
+
+Both pre-registered criteria (3a-xiv) pass: the anneal arm holds 1.000 through 400 steps
+with the gold program fully withdrawn, and 42% problem-level supervision is as good as
+100%. `answer_acc_hard` is 1.000 for both, so this is not a soft-readout artefact.
+
+**And then the check that should have come first.** At fixed depth the grammar builds a
+*balanced* tree, so the post-order traversal is identical for every problem — measured,
+**exactly 1 distinct pointer pattern across 300 depth-3 problems**, with only the
+operators varying (118 patterns of a possible 128). The program the model must emit is a
+**constant** 7-instruction address structure plus seven binary operator reads.
+
+That changes what these numbers mean, and mostly downward:
+
+- **`partial42` says much less than it appears to.** Supervision on 42% of problems
+  transfers to the other 58% — in a setting where the program is *the same program*.
+  It shows 42% is enough to learn a constant. GSM8K's programs genuinely differ per
+  problem in length, structure and operand addresses, so this arm does **not** license
+  the inference its criterion was written to support. The criterion is satisfied
+  literally; the conclusion I wanted from it does not follow. Recorded rather than
+  reinterpreted.
+- **`anneal` survives, but narrower.** What the answer loss holds without labels is a
+  constant pattern, not a per-problem program. The gap it bridges is nonetheless real:
+  the answer-only arm *fails to find this same constant*, so 0.015 → 1.000 is genuinely
+  attributable to the warm start.
+- **It also explains `sd` = 0.000 everywhere supervision is present.** A constant is
+  memorisable, which is why every supervised variant is perfect on every seed at both
+  depths. That is not evidence of a robust learner.
+
+**The one result it strengthens is the negative one.** Outcome-only induction cannot
+discover a pointer pattern that is *identical for every problem in the task* — 675
+choices per instruction over seven instructions, with the same answer every time, and
+it lands at 0.015. That is a worse verdict than 3a-xii stated, not a better one.
+
+**What this makes necessary:** a task whose program structure actually varies. The
+balanced-tree grammar cannot provide one, and `n_instr` was derived from depth until
+3a-xvi, so nothing here could express a short program. Variable-length or unbalanced
+expressions are the prerequisite for any claim about program *induction* as opposed to
+constant-pattern recall — including everything 3a-vii ever said.
+
+### 3a-xiii. Redundant residues on a trained model: the prediction fails
+
+3a-ix measured `RedundantResidueSystem` standalone — 100% of single-residue
+corruptions corrected, 0% mis-corrected — and nothing imported it. The depth-2 run in
+3a-xii gave the reason to: the answer-only arm's `mis_answered` was **0.442**, i.e.
+44% of held-out problems answered with a confident wrong number, with no checker in the
+path at all.
+
+So the arms were re-run with three redundant moduli (`(7,13,41)` on top of the core
+`(16,25,27,11,37)`; legitimate values then occupy 2.198e6 of an 8.200e9 ring, 0.027%).
+**Prediction, written into the code before the run: `mis_answered` collapses while
+`refused` absorbs it.**
+
+| arm | `answer_acc` | `refused` | `mis_answered` |
+| --- | --- | --- | --- |
+| `regmachine-supervised-redundant` | 1.000 (5/5) | 0.000 | 0.000 |
+| `regmachine-answer-only-redundant` | 0.540 (sd 0.423) | **0.013** | **0.446** |
+
+**The prediction is wrong.** Redundancy converted 1.3% of the error budget into
+refusal and left 44.6% as silent wrong answers — statistically indistinguishable from
+the 0.442 it was supposed to fix.
+
+**Why, and this is the part worth keeping.** Redundant residues detect a *corrupted
+codeword*: flip one residue and the reconstruction leaves the legitimate range. A
+random incoherent vector should be caught ~99.97% of the time in this ring, and the
+1.3% refusal rate says incoherent vectors are rare here. The failing seeds are not
+emitting corrupted codes. At `ptr_sharp` 0.86–0.89 their pointers are sharp enough that
+the program executes *coherently* — it is simply a **different program**, and its result
+is a perfectly legal integer that happens to be wrong.
+
+**Redundancy cannot detect a wrong answer, only an ill-formed one.** That distinction
+was implicit in 3a-ix and 3a-x and is now explicit, because it is the difference between
+the machinery being useful here and not. Both earlier measurements stand exactly as
+stated — single-residue corruptions and incoherent soft reads *are* caught — they just
+do not describe the error this model actually makes. The README's "the failure mode is
+refusal, never a wrong answer" is true of the **code** and is not a guarantee about the
+**computation**; it has been corrected to say so.
+
+What the run does establish, and it is not nothing: **the wider code is free.** The
+supervised arm is 1.000 on all 5 seeds with three extra residue blocks to predict (8
+instead of 5) and `mis_answered` exactly 0. So redundancy costs no accuracy and can be
+carried wherever an ill-formed code is the risk — a corrupted store, a soft read, a
+transmission — which is a narrower and more honest claim than the one this project was
+heading toward.
+
+Open, and the obvious next question: a checker for a *coherent but wrong* answer cannot
+come from the code space. It has to come from recomputation — the root-slot consistency
+idea of 3a-vi, which failed for a different reason (the model never learned the root), or
+from executing a second, independently-emitted program and comparing. Neither is built.
+
+### 3a-xii. Pre-registered: does outcome-only induction survive depth 3?
+
+3a-vii is the one learned claim in this project still standing, and the one the
+language bridge depends on, and it is `n=1`: depth 2, four operands, three
+instructions, `(+,−)`, one seed, run from a notebook cell. `lamb/study.py` exists
+precisely to stop claims of that shape and had never been pointed at it. It is now:
+`--arms regmachine-supervised regmachine-answer-only`.
+
+**The criterion, fixed before running.** Outcome-only induction (`program_coef=0`)
+reaches held-out `answer_acc` within noise of the supervised arm at **depth 3**, over
+≥5 seeds, by the exact permutation test in `lamb/study.py`. Read `answer_acc`;
+`canonical_acc` is conformity to the generator's form and is *expected* near zero for
+the answer-only arm, because 48 distinct three-instruction programs compute
+`(a+b)+(c+d)` and the grammar emits one of them. Low canonical agreement does not
+imply a wrong program — that inference has never held here.
+
+Two things that must be read alongside the number, or it means less than it looks:
+
+- **`dropped`.** Depth 3 and multiplication leave the ring, and until 3a-xi this
+  trainer trained on the wrapped value. Rows outside the ring are now masked and the
+  share is reported; an accuracy measured on 60% of a held-out set is not the same
+  number as one measured on all of it.
+- **The search space.** Pointer choices per instruction grow as `|ops| · n_slots²` —
+  3·7² at depth 2, 4·15² at depth 3 with division. This is not a small extrapolation
+  and a negative result is a real one, to be reported with the same energy as a
+  positive one.
+
+Division (`ops_key=2`, task `d2g1d`) is a second arm rather than part of this one:
+it needs rational registers, so the ring changes with it, and two changes in one
+comparison is the confound this project keeps retracting claims over.
+
+#### Depth 2 first, as a replication. It does not replicate.
+
+Before the pre-registered depth-3 run, the same arms at the depth 3a-vii actually
+measured. 5 seeds, 1000 steps, batch 64, `d_model=96`, moduli `(16,25,27,11,37)`:
+
+| arm | n | mean | sd | per seed |
+| --- | --- | --- | --- | --- |
+| `regmachine-supervised` | 5 | **1.000** | 0.000 | 1.000 ×5 |
+| `regmachine-answer-only` | 5 | **0.558** | **0.405** | 1.000, 1.000, 0.303, 0.283, 0.203 |
+
+*(Read `answer_acc_hard` below for the stricter and more honest version of this row:
+the arm mean is **0.422**, and the three failing seeds are at ~0.04 rather than ~0.25.)*
+
+**The `n=1` answer-only result in 3a-vii was a lucky seed.** It reported 1.000 and
+concluded that *"gradients through exact arithmetic are sufficient to induce a correct
+program from outcomes alone."* At 5 seeds that outcome occurs **twice**; the other
+three land at 0.203–0.303. The supervised arm, by contrast, is 1.000 on every seed
+with sd exactly 0.
+
+The honest claim is therefore **"outcome-only induction can find a correct program but
+does so unreliably"**, not "is sufficient". Two of five is a real capability and a
+poor foundation.
+
+Diagnostics, which say what the failing seeds are doing:
+
+| | supervised | answer-only |
+| --- | --- | --- |
+| `canonical_acc` | 1.000 | 0.000 |
+| `op_acc` | 1.000 | 0.547 |
+| `ptr_acc` | 1.000 | **0.037** |
+| `ptr_sharp` | 1.000 | 0.886 |
+| `mis_answered` | 0.000 | **0.442** |
+
+`canonical_acc 0.000` is expected and not a failure (48 programs compute
+`(a+b)+(c+d)`). With no redundant moduli configured, the 0.442 `mis_answered` are
+silent wrong answers, which is precisely the case 3a-ix exists for and which no arm
+here had switched on.
+
+**Per seed, `ptr_sharp` separates the two basins exactly, and that is the whole
+finding.** No extra compute; it was already in the run's own JSON:
+
+| arm | seed | `answer_acc` | `ptr_sharp` | `op_acc` | `canonical_acc` |
+| --- | --- | --- | --- | --- | --- |
+| answer-only | 0 | **1.000** | **1.0000** | 0.510 | 0.000 |
+| answer-only | 3 | **1.000** | **1.0000** | 0.655 | 0.000 |
+| answer-only | 1 | 0.303 | 0.7663 | 0.520 | 0.000 |
+| answer-only | 2 | 0.283 | 0.7744 | 0.456 | 0.000 |
+| answer-only | 4 | 0.203 | 0.8913 | 0.596 | 0.000 |
+| supervised | all 5 | 1.000 | 1.0000 | 1.000 | 1.000 |
+
+Every seed that reached `ptr_sharp = 1.0000` scored exactly 1.000. Every seed that did
+not scored below 0.31. There is no middle.
+
+**So the failure mode is not a wrong program, it is an *uncommitted* one.** That is a
+much sharper statement than "high variance", and it is mechanically consistent with
+3a-x: a soft pointer read is not a blend, because decoding argmaxes each modulus
+independently, so ~30% of blurred reads decode to a value in neither register. An
+undecided program cannot be right even when its intent is right.
+
+Note also that the two successful seeds have `canonical_acc 0.000`. They did not
+recover the grammar's program; they found a *different* program that is exactly
+correct — which is the 3a-vii non-uniqueness point holding up, and the reason
+`answer_acc` is the only correctness measure here.
+
+#### Pre-registered: is commitment the cause, or a symptom?
+
+`RegisterMachine` has carried straight-through Gumbel-Softmax on the discrete choices
+(`tau`, `hard`) since it was written, off by default, with the note that *"whether the
+discreteness is needed is a question to measure, not to assume."* The table above is
+the motivation for measuring it: straight-through keeps the forward pass discrete, so
+the executor sees a real program rather than a blur of several, which is exactly what
+the failing seeds lack.
+
+The confound to be honest about first: `ptr_sharp = 1` may be a *consequence* of having
+found a correct program rather than a cause of it — confidence following correctness.
+Forcing discreteness is the intervention that separates the two, because it supplies
+commitment without supplying any information about *which* program is right.
+
+**Criterion, fixed before running.** Arm `regmachine-answer-only-gumbel`
+(`program_coef=0`, `tau>0`, `hard=True`), 5 seeds, `d2g1`, everything else identical:
+
+- **Commitment is the cause** if the arm reaches `answer_acc` ≥ 0.9 on at least 4 of 5
+  seeds. The mechanism would then be that outcome-only induction finds correct
+  programs routinely and loses them to indecision.
+- **Commitment is a symptom** if pointers go sharp (`ptr_sharp` ≈ 1) while accuracy
+  stays near the 0.2–0.3 band. The gradient would then genuinely be pointing the wrong
+  way on those seeds, and outcome-only induction is weaker than even the corrected
+  reading above suggests.
+- **Neither, and the test did not run**, if `hard=True` destabilises training so that
+  `ptr_sharp` does not reach ~1. A precondition failure is not a licence to
+  reinterpret the outcome — that error is logged at 3a-vi and again two sections up.
+
+This is a question about the *executor*, which is the exact part of the design that
+distinguishes it from PAL/Program-of-Thought, so it is worth a clean answer either
+way.
+
+**On the statistics, including where my own criterion was badly written.** The paired
+difference is −0.442 with a 95% CI of [−0.745, −0.139] that excludes zero, but the
+exact permutation test gives *p* = **0.167** and the sign-flip test *p* = **0.250**.
+By this project's own rule — permutation tests, not intervals — that is *not*
+significant. The reason is the arm's own variance: at sd 0.405 the smallest paired
+difference 5 seeds can resolve is **0.513**, and the study prints that it would take
+**526 seeds** to resolve 0.05. Two of the five paired differences are exactly zero,
+which weakens the paired test further.
+
+So the criterion I pre-registered above — "within noise of the supervised arm ... by
+the exact permutation test" — is **wrong as worded**, and I am not going to read a
+pass out of it. A non-significant test is not evidence of equivalence, and a design
+that could not have detected a 50-point difference cannot certify a 44-point one as
+noise. That is the same error as 3a-i, where the boundary was never compared against a
+converged baseline: a test whose precondition fails did not run.
+
+What survives without any test is a description: three of five answer-only seeds
+scored 0.203–0.303, and no supervised seed came within 0.7 of that. The claim to make
+is about **reliability**, and reliability is what the n=1 result could not have seen.
+
+**This makes the GSM8K annotation finding (3c) more valuable, not less.** The reliable
+arm is the supervised one, and GSM8K supplies exactly that supervision for 42% of its
+train split — so the bridge does not have to depend on the mechanism that just failed
+to replicate.
+
+#### The pre-registered depth-3 verdict: outcome-only induction does not scale.
+
+5 seeds, 1000 steps, same settings, depth 3 (8 operands, **7 instructions**, 15
+registers):
+
+| arm | n | mean | sd | per seed |
+| --- | --- | --- | --- | --- |
+| `regmachine-supervised` | 5 | **1.000** | 0.000 | 1.000 ×5 |
+| `regmachine-answer-only` | 5 | **0.015** | 0.013 | 0.029, 0.021, 0.021, 0.002, 0.000 |
+
+Paired difference **−0.985**, 95% CI [−0.995, −0.975], **seed ranges disjoint**, exact
+permutation *p* = **0.0079**, sign-flip *p* = 0.0625 (its floor at 5 seeds).
+
+**The criterion fails, and unlike depth 2 this test was powered to say so.** The
+smallest paired difference 5 seeds could resolve here is **0.017**; the observed one is
+0.985, fifty-eight times that. Both arms need only 2 seeds for a 0.05 difference. There
+is no underpowering to hide behind and no reinterpretation to make.
+
+So: **gradients through exact arithmetic are not sufficient to induce a correct program
+from outcomes alone.** They were sufficient on two of five seeds over *three*
+instructions and on none over *seven*. The mechanism that ROADMAP 3a-vii called "the
+one thing in this design that a non-differentiable executor cannot do" does work — it
+just does not survive the step from a 3-instruction program to a 7-instruction one.
+
+That is not surprising in hindsight and the pre-registration said so before the run:
+pointer choices per instruction grow as `|ops| · n_slots²`, which is 3·7² = 147 at
+depth 2 and 3·15² = 675 at depth 3, over seven instructions instead of three. What the
+run establishes is that the answer signal alone does not navigate it.
+
+Meanwhile **the supervised arm is 1.000 on every seed at both depths**, with `sd`
+exactly 0 and `canonical_acc` 1.000. The executor, the algebra, the pointer masking and
+the register file all scale to depth 3 without a wobble. It is specifically the
+*outcome-only* learning signal that does not.
+
+**The soft-eval caveat is closed at this depth too, and the verdict does not move.**
+Executing the argmax program rather than the soft mixture gives `answer_acc_hard`
+**1.000** for the supervised arm (identical — `ptr_sharp` is exactly 1, so soft *is*
+argmax) and **0.025** for answer-only against its soft 0.015. At depth 2 hardening
+*hurt* the failing seeds (0.558 → 0.422); here it helps them negligibly (0.015 →
+0.025). Either way both numbers round to "nothing", so the readout is not what produced
+this result — which is the only thing the check needed to establish.
+
+The answer-only arm's `mis_answered` is **0.985** — essentially every held-out problem
+answered with a confident wrong number, since no redundancy was configured. `op_acc`
+sits at ~0.50 against a 0.33 chance baseline, so the operators are partly learned while
+the program as a whole is not, and `ptr_sharp` is 0.87–0.95: as at depth 2, the failing
+runs never commit.
+
+**What this costs the project.** The language bridge was described in 3a-vii as
+depending on this mechanism, because a word problem supplies no gold program. On this
+evidence that dependency is not safe, and the bridge should not be built on it. Two
+things carry the weight instead, both established tonight: GSM8K's calculator
+annotations supply a real program for 42% of the train split (3c), and the *supervised*
+arm is the one that is perfectly reliable. The honest plan is supervision where it
+exists and an answer-only arm reported as a control, not as the mechanism.
+
+#### The soft-eval caveat, tested: it went the other way, and the finding was understated
+
+`answer_acc` executes the *soft* program, so a blurred-but-recoverable program would be
+scored on a mixture it never computes — which would make the whole result an artefact of
+the readout rather than a fact about the learning. The argmax program is now executed as
+a real program and reported as `answer_acc_hard`. Depth 2, per seed:
+
+| seed | `ptr_sharp` | `answer_acc` (soft) | `answer_acc_hard` |
+| --- | --- | --- | --- |
+| 0 | 1.0000 | 1.000 | **1.000** |
+| 3 | 1.0000 | 1.000 | **1.000** |
+| 1 | 0.7663 | 0.303 | **0.043** |
+| 2 | 0.7744 | 0.283 | **0.041** |
+| 4 | 0.8913 | 0.203 | **0.027** |
+
+**Hardening does not rescue the failing seeds; it exposes them.** The committed seeds
+are identical either way (`ptr_sharp` is exactly 1, so soft *is* argmax). The
+uncommitted ones drop from 0.20–0.30 to **0.027–0.043** — the soft score was flattering
+them by roughly sevenfold, because a mixture can land on the right answer by spreading
+mass where the single program it would actually emit does not.
+
+So the caveat resolves against itself and **the earlier reading was too generous, not
+too harsh**. Two corrections to what is written above:
+
+- The failing seeds do not "collapse to ~0.25". They collapse to **~0.04**. The 0.25
+  was an artefact of scoring a mixture, and the arm mean is **0.422** on the stricter
+  reading rather than 0.558.
+- Depth 2 and depth 3 are therefore the *same* picture, not two different ones. At both
+  depths the answer-only arm either finds the program (1.000) or essentially fails
+  (~0.04 at depth 2, 0.015 at depth 3). **There is no partial credit in outcome-only
+  induction** — the intermediate scores were measurement, not learning.
+
+That also completes the case for `ptr_sharp` as the diagnostic: sharp gives 1.000, blurred
+gives ~0.04, and nothing sits between. And it is a reminder in the other direction from
+this project's usual one — the check was run expecting to weaken a negative result, and
+it strengthened it.
 
 ### 3a-ix. Redundant residues: correcting errors, not just detecting them
 
@@ -880,6 +1385,286 @@ emergent communication ([1903.05168](https://arxiv.org/abs/1903.05168));
 zero-shot coordination / Other-Play ([2003.02979](https://arxiv.org/abs/2003.02979));
 Interlat ([2511.09149](https://arxiv.org/abs/2511.09149)); DiffMAS
 ([2604.21794](https://arxiv.org/abs/2604.21794)).
+
+## 3c. The language bridge (GSM8K) — implemented, unmeasured
+
+`lamb/bridge.py` held a quantity parser, a resampler and a register loader, and no
+path between them; `encode_dataset` was referenced twice in its own docstring and
+defined nowhere. Nothing in the repo turned a sentence into a number.
+`lamb/bridge_train.py` (`python -m lamb.bridge_train`, `lamb-bridge`) is that path.
+
+    text -> frozen encoder -> cached embeddings     no
+    text -> quantities -> registers                 no   (regex + fixed rational map)
+    embeddings -> K latents (resampler)             yes
+    latents -> program over registers               yes
+    program -> answer                               no   (exact rational algebra)
+
+The encoder runs **once** over the dataset and is cached to disk, so it never
+participates in training and its size stops being a constraint. `transformers` is an
+optional extra (`uv sync --extra bridge`) rather than a dependency: every arithmetic
+number in this repo was produced under the pinned environment, torch moves accuracy
+on a model this small between minor versions, and a text front-end should not be able
+to shift the ground under a measurement it has nothing to do with.
+
+**GSM8K ships gold programs, and that changes the shape of this.** The premise
+recorded in 3a-vi and 3a-vii is that a natural-language problem does not come with a
+program, so the bridge rested entirely on the `n=1` outcome-only result. That is true
+of prose in general and **false of this dataset**: GSM8K's train solutions carry
+inline calculator annotations of the form `<<48/2=24>>` — an operation, its operands
+and its result, in evaluation order. So the bridge is a measurement with a control,
+not a leap: the supervised arm recovers a program from the dataset's own annotations,
+and `--program-coef 0` removes it entirely and asks 3a-vii's question on real text.
+
+Three things are built into it because each one caps what any model on top could
+reach, and all three are reported before training rather than inferred from a bad
+number afterwards:
+
+- **Coverage.** Only annotations that are a single binary operation over two
+  literals are usable; compound ones (`<<48*3+5=149>>`) need a parser and more than
+  one register write. Rejects are counted. So is `operand_miss` — the share of rows
+  whose annotation names a number the extractor never found, which is the ceiling on
+  the supervised arm and has nothing to do with the network.
+- **Execution check.** A program recovered from someone else's annotations is a
+  hypothesis. `verify_alignment` executes it in this ring and asks whether it
+  reproduces the dataset's own answer; if it does not, training on it would teach the
+  wrong program perfectly.
+- **Constant registers.** "Half as many", "twice", "a third", "20% off" each name an
+  operation whose other operand is never written down. Preloading `(1, 2, 3, 100)`
+  keeps that decision in the program — `x / 2`, not a parser deciding that "half"
+  means 0.5 — which is the same argument the percent flag already makes. By this
+  repo's own note, "half as many" is the most common operation in GSM8K, so without
+  the constants the alignment fails on problems the parser read perfectly.
+
+**Measured: coverage, and one defect it caught.** Run before any training
+(`python -m lamb.bridge_train --coverage`), on the official splits:
+
+| | n | no_answer | answer_not_in_chain | operand_miss | program_coverage |
+| --- | --- | --- | --- | --- | --- |
+| train | 7473 | 0.000 | 0.054 | 0.316 | **0.614** |
+| test | 1319 | 0.000 | 0.073 | 0.287 | **0.625** |
+
+Recovered programs that execute to the dataset's own stated answer: **1.000**.
+
+That last number was **0.824** on the first pass, and finding out why is the reason
+the check exists. 16.6% of usable annotation chains **end somewhere other than the
+answer** — the step that produced it was compound (`<<48*3+5=149>>`, which this
+parser rejects) or was never annotated at all. Keeping those meant one recovered
+program in six executed to the wrong number, which is worse than having no program:
+it is supervision toward a wrong answer, and the model would learn it perfectly. The
+chain is now truncated at the last step whose result *is* the answer, and a chain
+that never reaches it is dropped. The execution rate went 0.824 → 1.000, and coverage
+fell 0.533 → 0.420 to pay for it. **Less supervision that is correct beats more that is
+not.** (Coverage later recovered to 0.614 for an unrelated reason — see the compound
+decomposition below — and `answer_not_in_chain` fell 0.170 → 0.054 with it, because the
+step that produced the answer was so often the compound one.)
+
+**Ablated, because both of those components were added from reasoning rather than
+evidence.** `--no-lexical` existed as the ablation and nobody had run it:
+
+| constants | written numerals | `program_coverage` | Δ | what it buys |
+| --- | --- | --- | --- | --- |
+| `()` | no | 0.004 | — | |
+| `(1,)` | no | 0.239 | **+23.5** | the identity register, not a fact about GSM8K |
+| `(1,)` | yes | 0.318 | **+7.9** | "three", "a dozen" |
+| `(1,2)` | yes | 0.397 | **+7.9** | "half", "twice", "double" |
+| `(1,2,3)` | yes | 0.416 | +1.9 | "a third" |
+| `(1,2,3,100)` | yes | **0.420** | **+0.4** | percent |
+
+*(Measured before compound annotations were decomposed, so every row is ~19 points
+below its current value. The ablation is a comparison between rows and the ranking is
+unaffected; the absolute figures are not the headline coverage.)*
+
+The first row is a confound in my own measurement and is called out rather than
+reported: with no constants there is no register holding `1`, so the `x * 1` padding
+instruction is unavailable and rows are rejected for a reason that has nothing to do
+with the dataset. Isolating it costs one extra run and moves +23.5 points out of the
+"constants help" column, where they did not belong.
+
+With that removed, the ranking is: **the constant `2` and the written-numeral table are
+worth about 8 points each**, and they are the two components that were guesses. `2` is
+"half as many", which this repo's own note predicted would be the most common operation
+in GSM8K, and the measurement agrees. `3` is worth 1.9.
+
+**`100` is worth 0.4 and is nearly useless**, which is a negative result on a component
+added by reasoning about percent: GSM8K's annotations write a percentage as a decimal
+(`<<0.2*50=10>>`) rather than as `20/100`, so the constant is rarely what the chain
+asks for. It is kept only because it still nets positive against the register slot it
+occupies, and that is a thin margin rather than a justification.
+
+**The largest single fix, found by asking what was actually in the failures.** The 39%
+of usable chains that failed alignment break down as:
+
+| cause | share |
+| --- | --- |
+| an operand produced by a **rejected compound step** | **52.1%** |
+| integer operand absent from the text | 33.0% |
+| non-integer operand absent from the text | 13.9% |
+| register file full, a quantity pushed out | 0.9% |
+| needed more than 8 instructions | 0.1% |
+
+Half the gap was self-inflicted. A compound annotation (`<<48*3+5=149>>`) was rejected
+for not being a single binary operation — but it is simply *two* instructions, and
+rejecting it cascades: its result never reaches a register, so every later step that
+reads it fails to align too. `_lhs_steps` now decomposes it with a recursive-descent
+parser (precedence, left-associativity, parentheses, unary minus), and **coverage moved
+0.420 → 0.614** with `exec_ok` still exactly 1.000.
+
+Two things that breakdown settles, both of which were guesses in `BridgeConfig`: the
+register file is essentially never the constraint (0.9%, measured at `n_operands=12`
+with the four operation constants only -- it becomes 97.3% once unit constants are added,
+which is the coupling below) and the instruction budget almost never is (0.1% at
+`n_instr=8`). Chain length is median 3, p90
+6, p99 9, max 15, so `n_instr=12` would add +1.0 point of coverage for 50% more
+execution per step — measured and declined.
+
+**Then the same question again, and the answer changed.** Re-categorising what *still*
+failed after decomposition:
+
+| cause | share |
+| --- | --- |
+| **integer operand absent from the text** | **59.6%** |
+| non-integer operand absent from the text | 27.7% |
+| operand from a still-rejected step | 5.7% |
+| register file full | 3.8% |
+| chain longer than 8 instructions | 3.2% |
+
+The leader is not an extraction failure at all. *"Weng earns $12 an hour ... 50
+minutes"* needs **60**, and no parser can extract a number the problem never writes.
+That is unit knowledge, and it is the same shape as "half as many" needing a `2` — so
+it gets the same answer: `DEFAULT_CONSTANTS` gains `60, 24, 7, 12, 52, 1000`, and
+coverage moves **0.614 → 0.680** train, **0.691** test, `exec_ok` still 1.000.
+
+**And the naive version of that change is actively harmful, which is the finding worth
+keeping.** Every constant occupies a register slot. At `n_operands=12` those ten
+constants fill **97.3%** of register files and push the problems' own quantities out:
+coverage does not improve, it *halves*, 0.614 → **0.249**. Constants and file width are
+one decision:
+
+| constants | `n_operands` | coverage | file full |
+| --- | --- | --- | --- |
+| `(1,2,3,100)` | 12 | 0.614 | 0.044 |
+| `+ 6 unit constants` | 12 | **0.249** | **0.973** |
+| `+ 6 unit constants` | 16 | 0.657 | 0.162 |
+| `+ 6 unit constants` | **20** | **0.680** | 0.012 |
+
+`n_operands=20` is the default for that reason, and a test pins the pair together
+because adding a constant without widening the file is a regression that reads as a
+feature. The ring is unaffected (margin still 76.7×) since chain length is capped by
+`n_instr`, not by operand count — checked rather than assumed, after the last time a
+coverage change quietly ate the ring margin.
+
+The dominant remaining loss is now `operand_miss` at ~0.25: an operand the annotation
+names is not in the register file. Part of that is genuine extraction misses
+(`1/2`, values the text never writes), and part is a cascade — when a compound
+annotation is rejected, its result is never written to a register, so every later
+step that reads it fails to align. **That 0.42 is the ceiling on the supervised arm
+and it has nothing to do with the network**, which is exactly why it is measured
+first. The answer-only arm is not bounded by it: it trains on all 7473.
+
+**Measured: the ring GSM8K actually needs, which is far smaller than 3a-viii sized.**
+Also computable with no model in the loop. What matters in residue form is the
+*unreduced* numerator and denominator a program builds, since a fraction cannot be
+reduced — so simulate that growth in plain integers over the 4590 recovered programs:
+
+| percentile of worst \|num\|,\|den\| per program | value |
+| --- | --- |
+| p50 | **120** |
+| p90 | 5.5e3 |
+| p99 | 3.8e6 |
+| p99.9 | 1.1e9 |
+| p100 (worst of 4590) | **2.16e11** |
+
+`RATIONAL_MODULI` gives ±4.49e15 — **six orders of magnitude more than the worst case
+needs**. 3a-viii sized it from an argument ("five two-decimal values, denominator
+1e10"); the argument was not wrong, it was answering a worst case the data does not
+contain.
+
+`GSM8K_MODULI = (64, 125, 27, 11, 7, 13, 37, 101, 41)` is the measured sizing:
+±1.66e13, a **77× margin** on the observed worst case, every digit period still ≤ 6 —
+and much cheaper, because the packed path pads every modulus to the widest. 9 moduli at
+P=125 is `9·125² = 141k` against `10·271² = 734k`, so **5.2× less arithmetic per
+composition**, and the head width drops 697 → 426 units. It is the bridge's default;
+`RATIONAL_MODULI` is one constructor argument away.
+
+**It was 8 moduli and a 139× margin until the chains got longer, and that is the part
+worth remembering.** Decomposing compound annotations — a change about *coverage*,
+with no apparent connection to the ring — roughly tripled the median chain length, and
+since every operation multiplies denominators the worst case moved 2.91e9 → **2.16e11**
+and the margin collapsed **139× → 1.9×**. No program exceeded the ring even then, so
+nothing failed and **nothing would have failed visibly**: the next slightly longer chain
+would simply have wrapped to a different number. It was caught only by re-measuring the
+ring after a change that had nothing obviously to do with it.
+
+The alternatives with a larger margin were rejected on principle rather than cost:
+adding 73 or 137 instead of 41 buys a wider ring at similar width but pushes
+`max_period` to 8, and a modulus whose digit-coefficient pattern needs 8 positions to
+repeat is useless at the operand widths training actually sees. That constraint, which
+exists for extrapolation, did real work here.
+
+Two limits on that sizing, since it is a decision and not just an observation. It is
+measured over the programs the annotations *describe*, so a model emitting a different
+one — dividing repeatedly, say — is not bounded by it. And a soft, undecided program is
+bounded by nothing at all, because its decoded denominator is an argmax over
+incoherent residues rather than a value (see `ptr_sharp`). `denominator_magnitude`
+remains the monitor.
+
+**Measured: it runs end to end, and what it costs.** 7473 train and 1319 test
+problems encoded once by `all-MiniLM-L6-v2` at `max_len=192`, with **1 problem
+truncated** in 8792 — so the cache is not quietly cutting questions off. The trainer
+then runs text -> cached embeddings -> resampler -> shared latent core -> program ->
+exact rational execution, with gradients reaching the program heads through the
+arithmetic.
+
+Where the parameters are, which is the point of the design:
+
+| | params | share |
+| --- | --- | --- |
+| resampler (learned) | 0.318M | 38.4% |
+| shared latent core (learned) | 0.502M | 60.6% |
+| **program heads (learned)** | **7.7k** | **0.93%** |
+| frozen encoder | 22M, cached, never in the training graph | — |
+| the arithmetic | 0 | — |
+
+**The learned surface that decides *which computation to perform* is under eight
+thousand parameters.** Everything else compresses the text or performs arithmetic
+exactly. (It was 5k before `n_operands` went 12 → 20: the pointer heads are
+`Linear(d_model, n_slots)`, so they scale with the register file.)
+
+**Cost, and why no single number is given.** The same configuration measured **1.68
+s/step** and **2.48 s/step** at batch 8 within an hour of each other, differing only in
+what else the box was running. Earlier in this session a contended host turned a
+19-minute study arm into a reported 36,915 s (3a-xi, item 5), so a wall-clock figure
+from a shared machine is not a cost measurement and will not be quoted as one. The
+honest statement is that this is a CPU-bound prototype at ~2 s/step at batch 8, that a
+real run wants a bigger batch and a GPU, and that the profile in `CLAUDE.md` -- 92% of a
+register-machine step is torch forward+backward, ~6.5% the exact execution -- is the
+part that transfers between machines.
+
+**No accuracy is claimed.** Nothing here has been trained to convergence or run on a
+GPU, and this section will carry accuracy when there is accuracy. One number from the
+smoke run is worth repeating as a warning rather than a result: `max_den_magnitude`
+read **3.96e11** against a 4.04e11 ring after 10 steps, which looks like the ring is
+exhausted and is not. It is an argmax over each modulus independently, so an
+uncommitted program decodes to an essentially uniform ring value whatever the
+arithmetic did. Read it with `ptr_sharp` or do not read it. And the contamination
+claim stays withdrawn: the encoder is pretrained, it has seen these benchmarks, and
+"frozen" means its weights do not move rather than that the information is absent.
+What replaces the claim is an arm — `--encoder` swaps the tower, embeddings are
+cached, so running the same core on a pretrained encoder and on one that never saw
+the benchmark prices the encoder's prior directly. That arm is the only part of this
+work that would be a *new* result rather than a port, and it has not been run either.
+
+Known limits, recorded rather than left implicit:
+
+- `extract_quantities` is a regex plus a table of written cardinals. It does not see
+  `1/2`, and it emits spurious operands for dates, ordinals and item numbers, which
+  can push a real quantity out of a fixed-width register file. Quantity *selection*
+  is a missing component, not a tuning detail.
+- The register file is a fixed shape, so a chain longer than `n_instr` is rejected
+  rather than truncated.
+- The answer-side loss for rationals is the cross-product residual. Its only blind
+  spot is `0 ÷ 0`; a zero divisor with a live numerator is detected by the residual
+  itself. See 3a-xi, including where I had that wrong.
 
 ## 4. Deeper test-time memory (ATLAS)
 

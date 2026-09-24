@@ -164,9 +164,54 @@ exists (see the bridge below).
 
 ## The natural-language bridge (GSM8K, MATH, MMLU-STEM)
 
-`GSM8K` and `MATH` are the eventual targets, but they are *natural-language* math
-(word problems, LaTeX). Reaching them — and any MMLU-STEM subset — requires adding
-a language front-end (a text tokenizer feeding LAMb's latent core, or LAMb as an
-arithmetic module a language model calls). That is a deliberate roadmap fork, not
-a drop-in evaluation. Until then, the synthetic + length-generalization +
-long-context suite above is the honest way to measure this model.
+`GSM8K` and `MATH` are *natural-language* math, so they need a front-end rather than
+a new eval. That front-end now exists — `python -m lamb.bridge_train`
+(`lamb/bridge_train.py`) — as a **frozen, cached encoder feeding the existing latent
+core, which emits a program the rational algebra executes**. No language model is
+trained and no answer is generated as tokens. MMLU-STEM stays out of scope: it needs
+world knowledge, not a front-end.
+
+**Coverage is measured; accuracy is not.** On the official splits, before any
+training: `program_coverage` **0.614** train / **0.625** test, and recovered programs
+that execute to the dataset's own answer **1.000**.
+
+Two fixes got it there, in opposite directions. Execution correctness was 0.824 until
+chains that end on a step *other than the answer* were dropped — the step that produced
+it was usually compound or unannotated, and keeping them was supervision toward a wrong
+number, which a model learns perfectly. That cost coverage (0.533 → 0.420) to buy
+correctness. Then compound annotations (`<<48*3+5=149>>`) were *decomposed* into their
+binary steps rather than rejected, which recovered far more than was spent: rejecting
+them accounted for **52.1%** of all alignment failures, because a discarded step's
+result never reaches a register and every later step reading it fails too. Coverage
+0.420 → **0.614**, execution still 1.000. Unit constants (`60, 24, 7, ...`) then
+took it to **0.680** train / **0.691** test, because 59.6% of the remaining failures
+needed an integer the problem never writes — "an hour ... 50 minutes" requires 60.
+
+What it reports, and what to read first:
+
+- **Coverage, printed before training.** GSM8K's train solutions carry inline
+  calculator annotations (`<<48/2=24>>`), so this dataset *does* supply a gold
+  program — contrary to the premise that made the bridge look like a leap. Only
+  single-binary-operation annotations are usable; the rest are rejected and counted.
+- **`operand_miss` — extraction recall, and the real ceiling.** The share of rows
+  whose annotation names a number the extractor never found. If the numbers are not
+  in the register file, no program over it can be right, and that has nothing to do
+  with the network. Read it before reading any accuracy.
+- **Alignment execution rate.** A program recovered from someone else's annotations
+  is a hypothesis; `verify_alignment` executes it in this ring and asks whether it
+  reproduces the dataset's own answer. Training on one that does not would teach the
+  wrong program perfectly.
+- **Exact match** on the official test split, compared as an exact `Fraction`, with
+  `max_den_magnitude` beside it — denominators multiply and never reduce in residue
+  form, so that number is how a long chain announces it is approaching the ring
+  instead of producing a wrong answer.
+
+**The contamination arm is the only genuinely new result available here, and it has
+not been run.** The encoder is pretrained and has seen these benchmarks; "frozen"
+means its weights do not move, not that the information is absent, so the claim of a
+zero GSM8K→GSM1K gap *by construction* stays withdrawn. `--encoder` swaps the tower
+and embeddings are cached, so running the same core on a pretrained encoder and on
+one that never saw the benchmark prices the encoder's prior directly.
+
+The synthetic + length-generalization + long-context suite above remains the honest
+way to measure the *reasoning* core, which the bridge does not change.

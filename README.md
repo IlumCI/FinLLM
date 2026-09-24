@@ -23,20 +23,32 @@ because several headline claims have not. Full detail in `docs/ROADMAP.md`.
 | Residue algebra is exact | `+ − × ÷` exact at every in-range magnitude; composition exact at **depth 6** (a 64-operand expression) with nothing learned |
 | Exact rationals | 0 errors over 1200 random operations against Python's `Fraction`, including division |
 | Single-error correction | **100%** of single-residue errors corrected, **0%** mis-corrected, over 4,000 trials |
-| Program induction from outcomes alone | **1.000** held-out answer accuracy with `program_coef=0` — no gold program anywhere |
+| Program induction **from a supervised program** | **1.000** held-out answer accuracy, `sd` 0.000, on **all 5 seeds at both depth 2 and depth 3** — 7 instructions over 8 operands, executed exactly, `canonical_acc` 1.000 |
 | Latent code becomes canonical | Stage B partner randomization: zero-shot **0.935** vs trained-pair 0.941, blank ~0.00, on a clean split |
 | Trace supervision | **+6.7** over a converged, compute-matched baseline, *p* = 0.040, positive on all 5 seeds |
 
-**Retracted.** The parallel latent block's "+32.3 structural advantage" (it is
+**Retracted.** *Program induction from outcomes alone* — the headline of this table
+until a multi-seed study was pointed at it. It was `n=1`: at 5 seeds, depth 2 gives
+**0.558 (sd 0.405)**, succeeding on 2 seeds and collapsing to ~0.25 on 3; at depth 3 it
+gives **0.015**, against the supervised arm's 1.000, seed ranges disjoint,
+permutation *p* = 0.0079. The claim that "gradients through exact arithmetic are
+sufficient to induce a correct program from outcomes alone" is withdrawn: they suffice
+sometimes over three instructions and never over seven. Details and the pre-registered
+criterion in `docs/ROADMAP.md` 3a-xii.
+
+Also retracted earlier: the parallel latent block's "+32.3 structural advantage" (it is
 **−0.010 at *p* = 0.80** against a wall-clock-matched baseline); the claim that the
 restructure reduces variance (the baseline was simply undertrained); a "61 seeds"
 power figure computed from that same undertrained arm; SWITCH boundary tokens; the
 premise that on-policy RL moves the latent block; and "zero GSM8K→GSM1K contamination
 gap by construction", which does not survive a pretrained encoder.
 
-**The pattern worth noting: everything exact survived, and most things learned did
-not.** The one learned result that held is program induction — which works precisely
-because an exact executor carries the gradient.
+**The pattern worth noting: everything exact survived, and nothing learned has survived
+a multi-seed study unchanged.** Six retractions now, and every one of them came from
+building the control that could expose it. The exact machinery has instead gone the
+other way: the register machine, the algebra, the pointer masking and the rational
+registers all scale from depth 2 to depth 3 at 1.000 with `sd` 0.000 — it is the
+*learning signal*, not the execution, that keeps failing to generalise.
 
 ---
 
@@ -117,8 +129,16 @@ CRT has no locality — one wrong residue gives a wildly wrong number, so answer
 accuracy is roughly per-residue accuracy raised to the modulus count. Carrying extra
 moduli detects that, and dropping each in turn identifies and repairs it. At the
 measured 0.985 per-residue accuracy this takes **0.900 → 0.996**, with no label and no
-training. The failure mode is **refusal, never a wrong answer**: where the evidence
-does not single out a culprit, it returns `None`.
+training. Where the evidence does not single out a culprit it returns `None` — an
+admitted failure rather than a guess.
+
+**What it does not do, measured on a trained model.** Redundancy detects an *ill-formed
+code*, not a wrong answer. Asked to catch the register machine's real errors it
+converted **1.3%** of them into refusals and left **44.6%** as confident wrong numbers,
+because the failing runs emit coherent codes for a *different program* rather than
+corrupted codes for the right one. It costs nothing to carry — the supervised arm is
+1.000 on 5/5 seeds with three extra moduli — but it is a guard against corruption, not
+against being wrong. Detail in `docs/ROADMAP.md` 3a-xiii.
 
 ### The register machine (`lamb/regmachine.py`)
 
@@ -136,12 +156,23 @@ a pointer mask makes reading an unwritten register *unrepresentable*, and the sh
 static (which is what compilers can fuse across). Execution is differentiable: a read
 is a mixture over registers, an operation a mixture over composed results.
 
-**This is what a non-differentiable executor cannot do.** PAL and Program-of-Thought
-call an external Python interpreter, so a wrong answer cannot tell a pointer which way
-to move — the program can only be imitated or reinforced, and RL on this latent block
-was measured inert. Here the answer loss reaches the pointer heads *through exact
-arithmetic*, and with the gold program removed entirely the model still reaches 1.000
-held-out accuracy.
+**What a non-differentiable executor cannot do, and what that turned out to be worth.**
+PAL and Program-of-Thought call an external Python interpreter, so a wrong answer cannot
+tell a pointer which way to move — the program can only be imitated or reinforced, and
+RL on this latent block was measured inert. Here the answer loss does reach the pointer
+heads *through exact arithmetic*, and the gradient is real: with the gold program
+removed entirely, 2 of 5 seeds still reach 1.000 held-out accuracy at depth 2, on
+programs that match the generator's on *zero* instructions.
+
+**It does not scale, and the claim that it does is withdrawn.** At depth 2 the
+answer-only arm averages 0.558 with `sd` 0.405 — **0.422** when the program it would
+actually emit is executed rather than a soft mixture; at depth 3 — 7 instructions
+instead of 3 — it averages **0.015** against the supervised arm's 1.000, with disjoint
+seed ranges and permutation *p* = 0.0079. There is no partial credit: per seed it either
+reaches 1.000 or falls to ~0.04, and `ptr_sharp` predicts which. Pointer choices per instruction grow as `|ops| · n_slots²`
+(147 → 675), and the answer signal alone does not navigate that. The differentiable
+executor is a real capability that a Python interpreter lacks; it is not a substitute
+for knowing the program.
 
 ---
 
@@ -164,6 +195,45 @@ rule, with decimals carried as scaled integers — a rounded operand is a wrong 
 in a ring. The learned surface is therefore the one thing that genuinely requires
 understanding: **which computation to perform.**
 
+```bash
+uv sync --extra bridge                       # transformers is an optional extra
+python -m lamb.bridge_train --coverage       # extraction recall, before any training
+python -m lamb.bridge_train --encode         # run the frozen encoder once, cache it
+python -m lamb.bridge_train --train          # supervised arm
+python -m lamb.bridge_train --train --program-coef 0   # answer-only: no gold program
+```
+
+`transformers` is an **optional extra** on purpose. Every arithmetic number here was
+produced under the pinned environment, torch moves accuracy on a model this small
+between minor versions, and a text front-end should not be able to shift the ground
+under a measurement it has nothing to do with.
+
+**GSM8K ships gold programs, for 68% of the train split.** The premise that made the
+bridge look like a leap — a word problem does not come with a program, so everything
+rests on outcome-only induction — is true of prose in general and false of this dataset:
+GSM8K's train solutions carry inline calculator annotations (`<<48/2=24>>`), an
+operation with its operands and result in evaluation order. Compound ones
+(`<<48*3+5=149>>`) decompose into two instructions rather than being discarded, which is
+worth 19 points of coverage on its own. So the bridge is a measurement with a control:
+the supervised arm recovers a program from the dataset's own annotations,
+`--program-coef 0` removes it entirely.
+
+That matters more than it did, because outcome-only induction **does not scale** (see
+Retracted above). Supervision is the mechanism that works, and 61% of GSM8K supplies
+it.
+
+Three numbers are printed before training, because each caps what any model on top
+could reach: annotation coverage, `operand_miss` (the share of rows naming a number
+the extractor never found — extraction recall, nothing to do with the network), and
+whether a recovered program actually *executes* to the dataset's stated answer.
+
+**No accuracy is claimed.** It is built and unmeasured. `extract_quantities` cannot
+see `1/2`, and emits spurious operands for dates and ordinals; quantity selection is
+a missing component rather than a tuning detail. Constants `(1, 2, 3, 100)` are
+preloaded as registers so that "half as many" — by this repo's own count the most
+common operation in GSM8K — is expressible as `x / 2` rather than as a parser
+deciding what "half" means.
+
 ---
 
 ## Running things
@@ -175,6 +245,8 @@ python -m lamb.coconut                 # sequential continuous thought (Stage A 
 python -m lamb.comm                    # latent inter-agent communication (Stage B)
 python -m lamb.comm_pop                # partner randomization -> canonical code
 python -m lamb.study --task d2g1       # paired multi-seed comparison with error bars
+python -m lamb.study --task d3g1 --arms regmachine-supervised regmachine-answer-only
+python -m lamb.bridge_train --coverage # GSM8K: extraction recall before any training
 python -m lamb.memory_bench            # needle/passkey retrieval (infContext)
 python -m lamb.ruler_bench             # RULER-style long-context battery
 python -m lamb.poet                    # POET population of (environment, agent) pairs
@@ -206,7 +278,7 @@ minutes that closes it was two wrong headline claims.
 ## Tests
 
 ```bash
-python -m pytest -q          # 191 tests
+python -m pytest -q          # 237 tests
 ```
 
 Exactness properties are tested **without a model in the loop** — if composition is
@@ -223,6 +295,7 @@ lamb/
   alu.py            latent ALU: one value per slot, composed by the algebra
   regmachine.py     registers + emitted programs + differentiable execution
   bridge.py         frozen-encoder peripheral, exact quantity extraction
+  bridge_train.py   GSM8K: loader, annotation->program alignment, trainer, eval
   holdout.py        train/eval partition of the problem space
   study.py          paired multi-seed arms, permutation tests, power
   lotus.py          parallel supervised latent block

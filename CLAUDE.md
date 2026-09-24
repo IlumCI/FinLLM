@@ -41,12 +41,17 @@ A number-native latent reasoning model. **Exact where exactness is possible, lea
 only where it isn't.** The network emits *programs*; a residue algebra executes them
 exactly. The governing result of the project so far:
 
-> Everything exact survived scrutiny. Most things learned did not. The one learned
-> result that held — program induction from outcomes alone — works precisely because
-> an exact executor carries the gradient.
+> Everything exact survived scrutiny. Nothing learned has survived a multi-seed study
+> unchanged — six retractions, the most recent being *program induction from outcomes
+> alone*, which was `n=1` and gives 0.558 (sd 0.405) at depth 2 and **0.015** at depth
+> 3 against a supervised 1.000. The exact machinery went the other way: the register
+> machine scales depth 2 -> depth 3 at 1.000 with `sd` 0.000. It is the learning
+> signal, not the execution, that keeps failing to generalise.
 
 Prefer extending the exact machinery over adding learned components, unless the
-learned component is being measured properly.
+learned component is being measured properly. When a learned result is `n=1`, treat it
+as a hypothesis with a study attached, not as a result — `lamb/study.py` has now
+overturned every single-run claim it has been pointed at.
 
 ---
 
@@ -71,7 +76,30 @@ because the first pass missed five samplers — `comm_pop`, `latent_rl`, `selfpl
 
 **Out-of-range values are masked, never clipped.** In a residue ring a wrapped value
 is a *different number*, not a large one; training on one teaches arithmetic that is
-wrong.
+wrong. This has the same shape as the holdout rule above: it is only as good as its
+*least* careful trainer. `lamb/lotus.py` masked from the start and
+`RegMachineTrainer` did not, which went unnoticed for as long as the only
+configuration ever run — depth 2, one digit, `(+,−)` — could not leave the ring.
+`ResidueSystem.targets` is an unguarded `int(v) % p`, so the failure is a legal
+cross-entropy target for the wrong number. When adding a trainer, grep for
+`representable`, and report the drop rate rather than applying it silently.
+
+**A condition restated in two places will disagree in one of them.** The commit that
+added `/` guarded `_native.evaluate` against a Rust kernel whose lexer has no `/`
+token, and did not guard `_native.verify`. On any machine with the extension built,
+`verify("48/2", "24")` therefore returned **False** -- every division problem scored
+wrong, silently corrupting the only reward signal self-play has. CI runs the Python
+backend (`USING_RUST=False`), so nothing ever saw it. The fix is one `_rust_handles`
+predicate, not two copies of the same test, and the regression test is written against
+the *dispatch* so it would fail on a Rust build rather than passing on both.
+
+**A parser, an executor and a generator are three different questions.** Adding `/`
+to the tokenizer, grammar and evaluator did not make division reachable: `parse_expr`
+scanned `"+-*"` and `gold_program` defaulted to the integer `OPS`, both inside
+`RegMachineTrainer._prepare`, so generated data crashed its only consumer. Every
+rational test hand-fed `Fraction` values through hand-built pointers, and **a test
+that constructs its own inputs cannot fail on a parser.** When wiring a new operator
+or value type, write the test that starts from a string the generator wrote.
 
 **The failure mode is refusal, not a wrong answer.** `RedundantResidueSystem.correct`
 returns `None` when the evidence does not single out a culprit rather than picking the
@@ -98,6 +126,25 @@ convolutions lose mass, and a renormalised-but-wrong distribution decodes to a
 
 **Value-keyed lookups collide.** `(1+2)-(1+2)` has two equal-but-distinct subtrees;
 `.index()` hands both the same slot. Index by traversal position, compare with `is`.
+
+**A desktop file indexer will eat a study, and `.gitignore` does not stop it.**
+Writing the 1.3 GB GSM8K encoder cache into `./.cache` put KDE's Baloo at 77% CPU and
+3.7 GB RSS indexing file *content*; with 15 GB total the box dropped to 1 GB free and
+the study's workers were starved to **3.3% CPU each**. One 19-minute arm reported
+**36,915 s**, and the arithmetic could not explain it (8x41^2 vs 5x37^2 is 2x, not 32x).
+The same arm ran in **985 s** once the cache moved out of the tree. Two lessons: build
+artefacts belong outside the source directory (`~/.cache/lamb/`, which is now the
+default), and **a wall-clock number from a contended box is not a cost measurement** --
+check `uptime`, `free` and per-process `%CPU` before attributing a slowdown to the code.
+
+**Touching `torch.cuda` in a parent that then forks kills every child.**
+`resolve_device("auto")` calls `torch.cuda.is_available()`, which initialises CUDA;
+`ProcessPoolExecutor` defaults to fork; and under torch 2.14 `Adam.step` reaches
+`torch.accelerator.current_stream()` in a health check, so workers die on the first
+optimiser step *even when every arm is `device="cpu"`*. `lamb/study.py` now uses a
+spawn context. The clamp that looked like the CUDA safeguard was the cause. Note the
+shape: CI is CPU-only and GPU work was done from notebooks, so the harness had never
+run on a box with a card in it.
 
 **`pgrep`/`pkill -f <pattern>` matches the invoking shell** when the pattern appears in
 its own command line. This deadlocked a waiter and killed a launcher mid-flight. Put
@@ -138,7 +185,7 @@ comparison. The rules that resulted:
 ## Testing
 
 ```bash
-python -m pytest -q                       # 191 tests
+python -m pytest -q                       # 237 tests
 python -m pytest tests/test_algebra.py -q  # exactness, no model involved
 ```
 
@@ -162,6 +209,14 @@ CPU-first by design. `LAMB_DEVICE=cuda` overrides every config.
   (~300–500 MB). It clamps to `workers=1` on CUDA automatically.
 - Profiling says **98.5% of a training step is torch** forward+backward; data
   generation is 0.2%. Optimise kernels and batch size, not the Python around them.
+- The same holds on the **register-machine** path, which is worth stating separately
+  because it looks like it should not. At depth 3 (7 instructions, 28 registers,
+  `batch=64`, `d_model=96`): backward **56.6%**, transformer forward **35.8%**, and the
+  emitted program's *entire* exact execution — register file construction, three
+  compositions per instruction, the CRT decode — **~6.5%**. The `RegisterFile`
+  constructor's triple Python loop over `B x R x K` looks like an obvious target and is
+  not one: vectorising it buys at most a couple of percent. The lever is `torch.compile`
+  over the 92% that is torch, which the zero-graph-break property already permits.
 - Both the latent core and the register machine trace as a **single graph with zero
   breaks**, so `torch.compile` is available for free. That is also the argument
   against a JAX rewrite: it would buy fusion that is already reachable.
