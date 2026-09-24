@@ -930,6 +930,58 @@ anneal schedule (20%/60%) and the 42% ratio are single points, not swept, so a n
 result at these settings does not establish that no schedule works -- only that the
 obvious one does not. That distinction is the one 3a-ii failed to make about RL.
 
+### 3a-xvii. Self-knowledge without readability: agreement under resampling
+
+A design that never decodes its latents has spent its interpretability, so the only
+safety property left is the model telling you when not to trust it. Redundant residues
+cannot do that (3a-xiii: they catch an ill-formed code, and the failures are well-formed
+codes for the wrong program), and the exact verifier cannot do it off-distribution,
+which is the only regime that matters.
+
+`self_consistency` draws `n_samples` **discrete** programs from the model's own
+distribution through the Gumbel path, executes each exactly, and asks whether they agree.
+No labels and no verifier, so it survives leaving the distribution the checker was
+written for. It is the per-problem version of `ptr_sharp`, which at arm level already
+separates the outcomes perfectly -- but it needs no access to the logits, so it transfers
+to any emitter.
+
+**The one valid measurement, depth 3 supervised at step 50 (`acc` 0.559):**
+
+| | rows | accuracy |
+| --- | --- | --- |
+| 8 samples unanimous | 17 | **1.000** |
+| samples disagree | 239 | 0.527 |
+
+**Separation 0.473, and unanimous agreement is 17 for 17.** As a refusal rule it is
+high-precision and low-recall: when it says trust this, you can, and it says so on 6.6%
+of problems. Refusing on any disagreement also discards the 53% of disagreeing rows that
+were right, so it is a usable *precision* signal and not yet a usable *coverage* one.
+
+**Why there is exactly one valid row, and it is the interesting part.** The fallible
+window is a knife-edge: 0.035 at step 45, 0.559 at 50, 1.000 at 55. And every harder
+setting tried -- two-digit operands, multiplication, **depth 4 at 16 operands and 15
+instructions** -- reaches 1.000 by step 200.
+
+That is the constant-pointer degeneracy of 3a-xv showing up from a new direction. There
+is no partial competence because there is nothing partial to learn: one address pattern,
+memorised in a handful of steps. It also explains a failure recorded much earlier -- 3a-i
+could not get a `boundary_probe` number because it needed a model that was "competent
+*and* fallible (~50-70%), which this tiny model on these tasks does not provide." The
+reason is not the model's size. It is that the task has no middle.
+
+So the confidence signal cannot be properly evaluated until the program structure varies
+(the `shape` axis, 3a-xv) or on the bridge, where difficulty is continuous. What is
+established here is that the mechanism works where it can be measured at all, and that
+its precision is the part worth having.
+
+**A metric bug found on the way, and it is the same shape as the `nan` one.** The first
+run reported `separation 1.000` at every step past 80, which reads as the signal working
+perfectly. It was vacuous: `acc_split` was 0 because **no rows disagreed**, and the
+`max(1, n_split)` denominator turns an empty set into a perfect score. `self_consistency`
+now returns `n_agree`, `n_split` and a `valid` flag requiring at least eight of each,
+because a measurement that cannot distinguish "perfect" from "not applicable" will report
+the first.
+
 ### 3a-xvi. Forcing commitment: the pre-registered fork resolves against the hypothesis
 
 3a-xii found the answer-only failure is *indecision*, not error -- every seed at

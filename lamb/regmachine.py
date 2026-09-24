@@ -789,12 +789,22 @@ class RegMachineTrainer:
                 n_split += 1
                 n_ok_split += int(correct)
         n = max(1, n_agree + n_split)
+        # **The counts are returned because the separation is meaningless without them.**
+        # ``max(1, n_split)`` makes an *empty* disagreeing set report ``acc_split = 0``,
+        # so a model that agrees with itself on every single problem scores a perfect
+        # separation of 1.000 while having demonstrated nothing at all. Measured: a
+        # supervised depth-3 model goes 0.004 -> 1.000 between steps 40 and 80, and every
+        # row after that printed separation 1.000 over zero split rows. A confidence
+        # signal can only be evaluated where the model is competent *and* fallible, and
+        # ``n_split`` is what says whether it was.
         return {
             "acc": n_ok / n,
             "coverage": n_agree / n,                       # kept if you refuse on split
             "acc_agreed": n_ok_agree / max(1, n_agree),    # precision of the kept set
             "acc_split": n_ok_split / max(1, n_split),     # what refusal throws away
             "separation": (n_ok_agree / max(1, n_agree)) - (n_ok_split / max(1, n_split)),
+            "n_agree": float(n_agree), "n_split": float(n_split),
+            "valid": float(n_split >= 8 and n_agree >= 8),  # enough of both to mean it
             "n_samples": float(n_samples), "tau": tau,
         }
 
