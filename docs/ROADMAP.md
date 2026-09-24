@@ -1929,8 +1929,43 @@ Also missing, and cheaper: a task representation. The tokenizer has 22 symbols a
 them name a key, so a `(key, value)` context cannot currently be expressed at all. Any
 version of this starts there.
 
-Recorded rather than built, because a half-built version would be a benchmark that
-measures the harness.
+**Built, measured, and it does not work.** `lamb/memreg.py`: a context of `@k = v`
+bindings then a query `@i op @j =`, every value loaded into a register exactly by the
+fixed map, so nothing about arithmetic is learned and the only thing to produce is a
+pointer to the register a key named. 1500 steps, 8 bindings, 2-digit values, depth-1
+programs.
+
+| arm | accuracy | `ptr_acc` | by distance, 2 to 8 |
+| --- | --- | --- | --- |
+| `use_memory=True` | 0.176 | 0.117 | 0.54, 0.11, 0.03, 0.05, 0.03, 0.05, 0.00 |
+| memoryless control | 0.172 | 0.098 | 0.45, 0.20, 0.12, 0.01, 0.02, 0.03, 0.05 |
+
+**The neural memory makes no difference**, and both arms resolve only the nearest binding.
+So the failure is not "memory needed and absent": attention alone over 45 tokens does not
+do it either.
+
+The cause is representational and it is not the memory's fault. A register's index is the
+binding's *presentation order*, so resolving `@4` means knowing its binding was the third
+one. Nothing in the embedding carries that: the value channel carries magnitude and Abacus
+carries digit position *within a number*. The model is being asked to count bindings with
+no counter.
+
+**And the obvious fix dissolves the task.** Index registers by key id instead of
+presentation order and `@4` points at register 4 directly, but then the loader has already
+done the retrieval by rule and all that remains is a constant key->pointer mapping. Which
+is the same shape as 3a-xv: a task that looks like retrieval and is really recall of a
+fixed address.
+
+That sharpens what the honest version has to be. Retrieval only exists where there are
+**more bindings than registers**, so something must choose which values occupy the file.
+That is design 2 above, it is the one that earns the name infContext, and it inherits
+3a-vi's wall: whatever chooses has to hand the fixed encoder digits rather than an
+embedding. The version measured here was design 1, and design 1 is now known to be
+either unlearnable (order-indexed) or vacuous (key-indexed).
+
+One thing did transfer. The refusal signal of 3a-xix works on a *retrieval* failure and
+not only an arithmetic one: at 0.176 accuracy it accepted 0.2% of problems and was right
+on all of them. A model that cannot do the task declines to answer it.
 
 ## 4. Deeper test-time memory (ATLAS)
 

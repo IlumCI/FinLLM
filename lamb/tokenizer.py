@@ -42,7 +42,8 @@ class Encoded:
 class ArithmeticTokenizer:
     """Maps arithmetic strings to/from digit-level token sequences."""
 
-    def __init__(self, base: int = 10, reverse_digits: bool = True, max_number_len: int = 24):
+    def __init__(self, base: int = 10, reverse_digits: bool = True,
+                 max_number_len: int = 24, n_keys: int = 0):
         if not 2 <= base <= 10:
             raise ValueError("base must be in [2, 10] for single-char digits")
         self.base = base
@@ -71,9 +72,22 @@ class ArithmeticTokenizer:
         # one.
         self.DIV = self.EOT + 1
         self._op_ids["/"] = self.DIV
-        self.vocab_size = self.DIV + 1
+        # Key symbols for a (key, value) context, appended last for the third time and
+        # for the same reason: ids are positional, so anything inserted renumbers the
+        # operator block and invalidates every checkpoint. ``n_keys=0`` is the default,
+        # which leaves ``vocab_size`` and every id byte-identical to before.
+        #
+        # They exist because the memory pillar and the reasoning pillar could not be
+        # composed without them: with 22 symbols and none naming a key, a context of
+        # bindings the model must retrieve from cannot be written down at all.
+        self.n_keys = int(n_keys)
+        self.KEY0 = self.DIV + 1
+        self.SEP = self.KEY0 + self.n_keys
+        self.vocab_size = (self.SEP + 1) if self.n_keys else (self.DIV + 1)
 
         self._id_to_char: Dict[int, str] = {
+            **({self.SEP: ";"} if self.n_keys else {}),
+            **{self.KEY0 + i: f"@{i}" for i in range(self.n_keys)},
             self.EQ: "=",
             self.BOT: "<",
             self.EOT: ">",
