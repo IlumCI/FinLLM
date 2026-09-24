@@ -962,6 +962,64 @@ The varied task has one: supervised passes through intermediate accuracy over mo
 than the balanced task's five-step knife-edge, so `self_consistency` can finally be
 measured somewhere it means something.
 
+### 3a-xix. The answer's own sharpness is a calibrated refusal signal
+
+3a-xvii proposed agreement across resampled programs as the refusal signal. On varied
+structure it does not hold: separation swings from +0.38 to -0.22 across checkpoints with
+no trend, and at step 140 *every* problem where the samples disagreed was answered
+correctly. Two different programs compute the same function (the 48-programs point of
+3a-vii), so program-level disagreement is expected even when the model is right.
+
+The signal that does work reads the quantity the answer is actually decoded from: how
+peaked the **output register's residue distribution** is. Mean max-probability across
+moduli, no sampling, no labels, no verifier.
+
+Measured across training on `d3g1s` (accuracy rising 0.139 -> 1.000):
+
+| accuracy | `acc` given confident | coverage |
+| --- | --- | --- |
+| 0.139 | **1.000** | 0.006 |
+| 0.338 | **1.000** | 0.127 |
+| 0.652 | **1.000** | 0.488 |
+| 0.738 | **1.000** | 0.521 |
+| 0.879 | **1.000** | 0.545 |
+| 0.908 | **1.000** | 0.844 |
+
+**Precision is 1.000 at every checkpoint, and coverage tracks competence.** The signal
+refuses almost everything when the model knows almost nothing and accepts 84% once it is
+good, without being told which is which.
+
+Threshold sweep at 260 steps, 3 seeds. Two reached 1.000 accuracy and so cannot test
+precision; the informative seed sits at 0.871:
+
+| threshold | precision | coverage |
+| --- | --- | --- |
+| 0.5 | 190/196 | 0.77 |
+| 0.7 | **183/183** | 0.71 |
+| 0.9 | **180/180** | 0.70 |
+
+The threshold is load-bearing: 0.5 leaks six wrong answers, 0.7 leaks none.
+
+**Why this works, and why a language model cannot have it.** The answer is *composed* by
+exact arithmetic from the operands via the emitted program. Composition of distributions
+is exact, so the output distribution's sharpness is a faithful readout of the program's
+determinacy: a peaked result can essentially only arise from a coherent program over
+coherent operands. The calibration is a property of the executor, not of a learned
+confidence head, which is why it needs no calibration data and why it should survive
+leaving the distribution a verifier was written for. A model that emits an answer as
+tokens has no such quantity to read.
+
+This is the one thing a design that refuses to expose its reasoning actually needs:
+self-knowledge without readability. Unlike the verifier it needs no ground truth, and
+unlike redundant residues (3a-xiii) it catches a *wrong* answer rather than only an
+ill-formed one.
+
+Limits, stated: the precision claim rests on one informative seed plus seven independent
+checkpoints, because the other two seeds trained to 1.000 and had no errors to catch. It
+is measured on a supervised model; the answer-only arm never reaches a regime where
+refusal would help. And coverage is the cost, not the precision: at 0.871 accuracy it
+declines 30% of problems it would have answered correctly.
+
 ### 3a-xvii. Self-knowledge without readability: agreement under resampling
 
 A design that never decodes its latents has spent its interpretability, so the only

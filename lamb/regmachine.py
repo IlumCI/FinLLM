@@ -751,7 +751,7 @@ class RegMachineTrainer:
     # -- self-knowledge ----------------------------------------------------
     @torch.no_grad()
     def self_consistency(self, n_tasks: int = 256, n_samples: int = 8,
-                         tau: float = 1.0) -> Dict[str, float]:
+                         tau: float = 1.0, conf_threshold: float = 0.9) -> Dict[str, float]:
         """Does the model know when its own program is wrong? No labels, no verifier.
 
         Redundant residues detect an *ill-formed code* and cannot detect a well-formed
@@ -791,6 +791,28 @@ class RegMachineTrainer:
             got, _ = self._decode_answers(regs, out_reg)
             votes.append(got)
 
+        # Correctness is judged on the program the model would **actually emit** -- the
+        # argmax, executed as a real program -- and agreement is only the confidence
+        # signal. Scoring a *sample* instead conflates sampling noise with model error:
+        # the first version did that and reported 0.61 accuracy where the deterministic
+        # path reaches 1.000, so every conditional accuracy in it was measuring the wrong
+        # thing.
+        det_regs, det_logits = self.machine.run(latent_h, vals, tau=0.0, hard=False,
+                                                counts=torch.tensor(self._counts,
+                                                                    device=self.device))
+        op_i, a_i, b_i = (x.argmax(-1) for x in det_logits)
+        progs = [[(int(op_i[i, t]), int(a_i[i, t]), int(b_i[i, t]))
+                  for t in range(self.n_instr)] for i in range(len(answers))]
+        hard_regs = run_program(self.machine, vals, progs, str(self.device))
+        if self.rational:
+            hn = self.machine.sys.decode(
+                self.machine.alg.unpack(hard_regs.num[:, out_reg]))
+            hd = self.machine.sys.decode(
+                self.machine.alg.unpack(hard_regs.den[:, out_reg]))
+            emitted = [None if d == 0 else Fraction(n, d) for n, d in zip(hn, hd)]
+        else:
+            emitted = [Fraction(v) for v in hard_regs.decode(out_reg)]
+
         n_ok = n_agree = n_ok_agree = n_split = n_ok_split = 0
         for i, (a, k) in enumerate(zip(answers, keep)):
             if not k:
@@ -798,7 +820,7 @@ class RegMachineTrainer:
             col = [v[i] for v in votes]
             modal = max(set(map(str, col)), key=lambda x: list(map(str, col)).count(x))
             share = list(map(str, col)).count(modal) / len(col)
-            correct = col[0] is not None and col[0] == Fraction(a)
+            correct = emitted[i] is not None and emitted[i] == Fraction(a)
             n_ok += int(correct)
             if share == 1.0:
                 n_agree += 1
@@ -806,6 +828,28 @@ class RegMachineTrainer:
             else:
                 n_split += 1
                 n_ok_split += int(correct)
+        # A second signal, and a cheaper one: how peaked the *answer's own* residue
+        # distribution is at the output register. Sampling agreement asks whether the
+        # model would emit the same program twice; this asks whether the value it
+        # computed is concentrated. It needs no samples, and it reads the quantity the
+        # answer is actually decoded from.
+        blocks = (self.machine.alg.unpack(det_regs.num[:, out_reg]) if self.rational
+                  else [b[:, out_reg] for b in det_regs.blocks])
+        conf = torch.stack([b.max(-1).values for b in blocks]).mean(0)   # (B,)
+        n_conf = n_ok_conf = n_unconf = n_ok_unconf = 0
+        for i, (a, k) in enumerate(zip(answers, keep)):
+            if not k:
+                continue
+            correct = emitted[i] is not None and emitted[i] == Fraction(a)
+            # 0.9 by default, and the threshold is load-bearing: at 0.5 six wrong
+            # answers leaked through on a model at 0.871 accuracy, at 0.7 none did.
+            if float(conf[i]) >= conf_threshold:
+                n_conf += 1
+                n_ok_conf += int(correct)
+            else:
+                n_unconf += 1
+                n_ok_unconf += int(correct)
+
         n = max(1, n_agree + n_split)
         # **The counts are returned because the separation is meaningless without them.**
         # ``max(1, n_split)`` makes an *empty* disagreeing set report ``acc_split = 0``,
@@ -821,6 +865,11 @@ class RegMachineTrainer:
             "acc_agreed": n_ok_agree / max(1, n_agree),    # precision of the kept set
             "acc_split": n_ok_split / max(1, n_split),     # what refusal throws away
             "separation": (n_ok_agree / max(1, n_agree)) - (n_ok_split / max(1, n_split)),
+            "conf_cover": n_conf / max(1, n_conf + n_unconf),
+            "acc_conf": n_ok_conf / max(1, n_conf),
+            "acc_unconf": n_ok_unconf / max(1, n_unconf),
+            "conf_sep": (n_ok_conf / max(1, n_conf)) - (n_ok_unconf / max(1, n_unconf)),
+            "n_conf": float(n_conf), "n_unconf": float(n_unconf),
             "n_agree": float(n_agree), "n_split": float(n_split),
             "valid": float(n_split >= 8 and n_agree >= 8),  # enough of both to mean it
             "n_samples": float(n_samples), "tau": tau,
