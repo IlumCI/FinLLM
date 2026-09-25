@@ -1978,11 +1978,43 @@ a distribution over *candidate index*, index is presentation order, so selecting
 binding for `@4` still means knowing it was the third one. Moving the choice from the
 pointer to the loader relocated the counting problem without solving it.
 
-**The fix this identifies.** Selection must be a pointer into the *sequence*, scored from
-the hidden state at each binding's position, rather than an index into an abstract
-candidate list. Then "where was `@4` bound" is an attention operation, which is the one
-thing the architecture is already good at, and the loader reads the digits at the chosen
-position. That is a pointer network over context positions and it is not built.
+**The fix this identifies, built, and it works.** Selection must be a pointer into the
+*sequence*, scored from the hidden state at each binding's position, rather than an index
+into an abstract candidate list. Then "where was `@4` bound" is an attention operation and
+the loader reads the digits found there, so the fixed map still does all the encoding.
+`PointerLoader`, same task and same everything else, 3000 steps:
+
+| selection | `sel_loss` | accuracy |
+| --- | --- | --- |
+| **pointer (content)** | 2.773 -> **0.836** | **0.754** |
+| index (order) | 2.789, pinned at ln(16) | 0.008 |
+
+**Accuracy by distance is flat**: 0.80, 0.78, 0.94, 0.71, 0.77, 0.79, 0.74, 0.61, 0.65,
+0.87, 0.88, 0.70, 0.73 across distances 4 to 16. Retrieval does not decay with how far back
+the binding was, which is the property the pillar is named for, and it is the first working
+composition of retrieval with exact computation in this repo.
+
+The anchor is the `SEP` closing each binding rather than the key token: attention is causal,
+so at the key position the value has not been read and the hidden state cannot identify what
+the binding holds.
+
+Two readings to get right.
+
+**`select_acc` of 0.211 against accuracy 0.754 is not a contradiction.** It requires the
+argmax selection to match the *generator's* slot assignment, and register slots are
+interchangeable: loading the right value into slot 2 rather than slot 1 is correct provided
+the program points at slot 2. So it measures conformity and not competence, exactly as
+`canonical_acc` does for programs (3a-vii). Answer accuracy is the correctness measure.
+
+**The refusal signal's coverage collapses here, to 0.008 at precision 1.000.** Soft
+selection makes each register a *mixture* over candidates, so the composed answer
+distribution stays blurred even when its argmax is right, and the sharpness signal reads the
+blur. Precision survives; coverage does not. Evaluating with a hard selection should recover
+it, and that is untested.
+
+Untested also: the memory. Both arms here ran `use_memory=True`, so nothing yet separates the
+O(1) state from attention on this task, and across designs 1 and 2 the memory has made no
+measurable difference. And this is one seed.
 
 One flaw of mine in the above, which does not explain the result but should not stand: the
 unqueried register slots were supervised toward a randomly drawn binding on every sample,

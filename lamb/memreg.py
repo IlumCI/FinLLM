@@ -114,6 +114,15 @@ class MemRegTask:
         enc.ans_start = len(enc.ids)
         return enc
 
+    def binding_anchors(self, enc: Encoded, n_binding: int) -> List[int]:
+        """Index of the SEP closing each binding.
+
+        The anchor is the *end* of ``@k = v``, not the key token: attention is causal, so
+        at the key position the value has not been read yet and the hidden state cannot
+        identify what the binding holds.
+        """
+        return [i for i, t in enumerate(enc.ids) if t == self.tok.SEP][:n_binding]
+
     def collate(self, eps: Sequence[Dict], device: str = "cpu"):
         """Left-padded prompts, so the query sits at a common column for every row."""
         encs = [self.encode(e) for e in eps]
@@ -131,8 +140,17 @@ class MemRegTask:
             val[i, off:] = torch.tensor(e.value, device=device)
             vm[i, off:] = torch.tensor(e.value_mask, device=device)
             pad[i, off:] = False
+        # Where each binding ends, shifted by the left padding. -1 marks a slot with no
+        # binding, which the pointer masks out rather than scoring.
+        n_max = max(len(e.get("vals", [])) for e in eps) if eps else 0
+        n_max = max(n_max, 1)
+        anchor = torch.full((b, n_max), -1, dtype=torch.long, device=device)
+        for i, (e, enc) in enumerate(zip(eps, encs)):
+            off = w - len(enc)
+            for j, pos in enumerate(self.binding_anchors(enc, len(e["vals"]))):
+                anchor[i, j] = off + pos
         return {"input_ids": ids, "abacus_ids": ab, "value": val,
-                "value_mask": vm, "pad_mask": pad}
+                "value_mask": vm, "pad_mask": pad, "anchor": anchor}
 
     # -- what the register machine needs -----------------------------------
     def registers(self, eps: Sequence[Dict]) -> Tuple[List[List[int]], List[int]]:
@@ -406,7 +424,8 @@ class MemRegTrainer2:
 
     def __init__(self, cfg2: MemRegConfig2, model_cfg, n_latent: int = 8, loops: int = 3,
                  lr: float = 3e-4, device: str = "cpu", moduli=(16, 25, 27, 11, 37),
-                 select_coef: float = 1.0, program_coef: float = 1.0):
+                 select_coef: float = 1.0, program_coef: float = 1.0,
+                 pointer: bool = True):
         from .algebra import ResidueAlgebra, ResidueSystem
         from .lotus import LotusReasoner
         from .model.lamb import build_model
@@ -423,8 +442,13 @@ class MemRegTrainer2:
             raise ValueError(f"n_latent={n_latent} must hold {cfg2.n_registers} selection "
                              f"slots plus 1 instruction")
         self.core = LotusReasoner(build_model(model_cfg, tok), n_latent, loops).to(device)
-        self.loader = SelectiveLoader(model_cfg.d_model, cfg2.n_registers,
-                                      cfg2.n_keys).to(device)
+        # ``pointer=True`` scores bindings by content; the index-based loader is kept
+        # only as the control that produced a uniform distribution for 4000 steps.
+        self.pointer = pointer
+        self.loader = (PointerLoader(model_cfg.d_model, cfg2.n_registers)
+                       if pointer else
+                       SelectiveLoader(model_cfg.d_model, cfg2.n_registers,
+                                       cfg2.n_keys)).to(device)
         self.machine = RegisterMachine(model_cfg.d_model, cfg2.n_registers, 1,
                                        self.sys, device=device).to(device)
         self._RF = RegisterFile
@@ -450,7 +474,18 @@ class MemRegTrainer2:
                     prompt["value"], prompt["value_mask"])
         _, _, latent_h, _ = self.core.latent_block(x, prompt["pad_mask"])
         codes = self.task.candidate_codes(eps, self.alg, self.sys, self.device)
-        loaded, sel_lg = self.loader.load(latent_h, codes, tau, hard)
+        if self.pointer:
+            # A separate pass for the sequence states the pointer scores against: the
+            # latent block returns only the latents, and the anchors live in the prompt.
+            h_seq, _ = m.core(x, prompt["pad_mask"])
+            n = codes.size(1)
+            anc = prompt["anchor"]
+            if anc.size(1) < n:
+                anc = torch.cat([anc, anc.new_full((anc.size(0), n - anc.size(1)), -1)], 1)
+            sel_lg = self.loader.logits(latent_h, h_seq, anc[:, :n])
+            loaded = self.loader.load(sel_lg, codes, tau, hard)
+        else:
+            loaded, sel_lg = self.loader.load(latent_h, codes, tau, hard)
 
         # The loaded registers *are* the file. Built by hand rather than through
         # RegisterFile's integer constructor, because their contents are distributions
@@ -474,7 +509,9 @@ class MemRegTrainer2:
         eps = self._batch(batch)
         regs, logits, sel_lg = self._forward(eps)
         sel_gold, prog_gold = self.task.gold2(eps)
-        sel = self.loader.select_loss(sel_lg, sel_gold)
+        sel = torch.nn.functional.cross_entropy(
+            sel_lg.reshape(-1, sel_lg.size(-1)),
+            torch.tensor(sel_gold, device=self.device).reshape(-1), ignore_index=-100)
         prog = self.machine.program_loss(logits, prog_gold)
         tgt = self.sys.targets([e["answer"] for e in eps], device=self.device)
         out_reg = self.cfg2.n_registers
@@ -520,3 +557,46 @@ class MemRegTrainer2:
                 "acc_conf": (sum(1 for i in keep if got[i] == answers[i]) / len(keep))
                             if keep else float("nan"),
                 "by_distance": {d: sum(v) / len(v) for d, v in sorted(by_d.items())}}
+
+
+class PointerLoader(torch.nn.Module):
+    """Select bindings by *content*, not by index.
+
+    ``SelectiveLoader`` scored a distribution over candidate index, and index is
+    presentation order, so choosing the binding for ``@4`` still required knowing it was
+    the third one. The head sat at exactly uniform for 4000 steps (`sel_loss` = ln(16))
+    with and without the neural memory. The counting problem had been relocated, not
+    solved.
+
+    Here each register slot emits a *query* and scores it against the hidden state at the
+    end of every binding. Those states have causally seen ``@k = v``, so the score is a
+    content match and "where was ``@4`` bound" becomes the attention operation the
+    architecture is already built for. The loader still only chooses *where to look*: the
+    digits found there are encoded by the same fixed map, so ROADMAP 3a-vi's wall is
+    untouched.
+    """
+
+    def __init__(self, d_model: int, n_registers: int):
+        super().__init__()
+        self.n_registers = n_registers
+        self.q = torch.nn.Linear(d_model, d_model)
+        self.k = torch.nn.Linear(d_model, d_model)
+        self.scale = d_model ** -0.5
+
+    def logits(self, latent_h: torch.Tensor, h_seq: torch.Tensor,
+               anchor: torch.Tensor) -> torch.Tensor:
+        """``(B, R, N)``. ``anchor`` is ``(B, N)`` positions, ``-1`` where absent."""
+        idx = anchor.clamp_min(0)
+        h_anchor = torch.gather(
+            h_seq, 1, idx.unsqueeze(-1).expand(-1, -1, h_seq.size(-1)))   # (B, N, d)
+        lg = torch.einsum("brd,bnd->brn",
+                          self.q(latent_h[:, : self.n_registers]),
+                          self.k(h_anchor)) * self.scale
+        return lg.masked_fill((anchor < 0).unsqueeze(1), float("-inf"))
+
+    @staticmethod
+    def load(lg: torch.Tensor, codes: torch.Tensor, tau: float = 0.0,
+             hard: bool = False):
+        w = (torch.softmax(lg, dim=-1) if tau <= 0 else
+             torch.nn.functional.gumbel_softmax(lg, tau=tau, hard=hard, dim=-1))
+        return torch.einsum("brn,bnkp->brkp", w, codes)
